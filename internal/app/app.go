@@ -37,7 +37,7 @@ func New(
 	redis, err := redisstore.New(
 		context,
 		redisstore.Config{
-			Address:  config.GRPC.Address,
+			Address:  config.Redis.Address,
 			Password: config.Redis.Password,
 			DB:       config.Redis.DB,
 		},
