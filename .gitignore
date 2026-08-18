@@ -34,3 +34,4 @@ coverage.html
 # Ignore build files
 /iot-ingestion
 /migrate
+/bin/*
