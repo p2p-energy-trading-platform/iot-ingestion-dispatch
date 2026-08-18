@@ -1,0 +1,22 @@
+services:
+  iot-ingestion-dispatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKER: kafka:29092
+      POSTGRES_URL: ${DOCKER_POSTGRES_URL}
+      REDIS_ADDRESS: redis:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - gridx-infra-network
+
+    restart: unless-stopped
