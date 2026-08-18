@@ -32,5 +32,5 @@ coverage.html
 # vendor/
 
 # Ignore build files
-iot-ingestion
-migrate
+/iot-ingestion
+/migrate
