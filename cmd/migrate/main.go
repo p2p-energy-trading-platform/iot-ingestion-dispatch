@@ -105,7 +105,11 @@ func run(
 	}
 
 	db := stdlib.OpenDB(*config)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to close database connection", "error", err)
+		}
+	}()
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf(

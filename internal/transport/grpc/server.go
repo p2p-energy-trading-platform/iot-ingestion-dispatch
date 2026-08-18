@@ -27,11 +27,11 @@ func (server *Server) Run() error {
 	listener, err := net.Listen("tcp", server.address)
 
 	if err != nil {
-		return fmt.Errorf("Listen grpc: %w", err)
+		return fmt.Errorf("listen grpc: %w", err)
 	}
 
 	if err := server.server.Serve(listener); err != nil {
-		return fmt.Errorf("Serve grpc: %w", err)
+		return fmt.Errorf("serve grpc: %w", err)
 	}
 
 	return nil
