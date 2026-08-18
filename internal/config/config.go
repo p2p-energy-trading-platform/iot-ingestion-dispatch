@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -47,6 +49,10 @@ type HealthConfig struct {
 }
 
 func Load() (*Config, error) {
+	if err := godotenv.Load(); err != nil {
+		return nil, err
+	}
+
 	config := Config{
 		Service: ServiceConfig{
 			Name:            env("SERVICE_NAME", "iot-ingestion-dispatch"),
