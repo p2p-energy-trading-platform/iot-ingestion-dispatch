@@ -30,3 +30,7 @@ coverage.html
 
 # Go vendor directory (uncomment if you do NOT want to commit vendor dependencies)
 # vendor/
+
+# Ignore build files
+iot-ingestion
+migrate
