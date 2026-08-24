@@ -1,4 +1,4 @@
-package store
+package postgres
 
 import (
 	"context"
@@ -16,7 +16,6 @@ func New(
 	databaseUrl string,
 ) (*Store, error) {
 	config, err := pgxpool.ParseConfig(databaseUrl)
-
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres config: %w", err)
 	}
@@ -28,7 +27,6 @@ func New(
 
 	if err := pool.Ping(context); err != nil {
 		pool.Close()
-
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
