@@ -2,18 +2,20 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Service  ServiceConfig
-	Kafka    KafkaConfig
-	Postgres PostgresConfig
-	Redis    RedisConfig
-	GRPC     GRPCConfig
-	Health   HealthConfig
+	Service   ServiceConfig
+	Kafka     KafkaConfig
+	Postgres  PostgresConfig
+	Redis     RedisConfig
+	GRPC      GRPCConfig
+	Health    HealthConfig
+	Admission AdmissionConfig
 }
 
 type ServiceConfig struct {
@@ -48,6 +50,16 @@ type HealthConfig struct {
 	Address string
 }
 
+// AdmissionConfig controls the grid-registry startup bootstrap and
+// periodic refresher - see 05-startup-registry.md.
+type AdmissionConfig struct {
+	// RefreshInterval between periodic full-snapshot grid registry
+	// refreshes. Defaults to 120s per the documented recommendation;
+	// overridable via ADMISSION_REFRESH_INTERVAL (Go duration syntax,
+	// e.g. "120s", "2m").
+	RefreshInterval time.Duration
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -71,7 +83,9 @@ func Load() (*Config, error) {
 		},
 
 		Redis: RedisConfig{
-			Address: env("REDIS_ADDRESS", "localhost:6379"),
+			Address:  env("REDIS_ADDRESS", "localhost:6379"),
+			Password: os.Getenv("REDIS_PASSWORD"),
+			DB:       envInt("REDIS_DB", 0),
 		},
 
 		GRPC: GRPCConfig{
@@ -80,6 +94,10 @@ func Load() (*Config, error) {
 
 		Health: HealthConfig{
 			Address: env("HEALTH_ADDRESS", ":8080"),
+		},
+
+		Admission: AdmissionConfig{
+			RefreshInterval: envDuration("ADMISSION_REFRESH_INTERVAL", 120*time.Second),
 		},
 	}
 
@@ -97,4 +115,36 @@ func env(key, fallback string) string {
 	}
 
 	return fallback
+}
+
+// envInt reads key as an integer, falling back to fallback if unset or
+// unparsable.
+func envInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+// envDuration reads key using Go duration syntax (e.g. "120s", "2m"),
+// falling back to fallback if unset or unparsable.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
 }
