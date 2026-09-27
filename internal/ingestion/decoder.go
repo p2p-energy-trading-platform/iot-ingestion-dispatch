@@ -33,8 +33,8 @@ const (
 )
 
 var (
-	gridIDPattern = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
-	houseIDSuffix = regexp.MustCompile(`^house[0-9]{1,10}$`)
+	gridIDPattern  = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+	houseIDSuffix  = regexp.MustCompile(`^house[0-9]{1,10}$`)
 	assetIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 )
 
@@ -187,30 +187,15 @@ func DecodeMeterReading(raw []byte) (domain.MeterReading, error) {
 		return domain.MeterReading{}, err
 	}
 
-	// net_kw reconciliation against simulation_plan.md section 5.4's
-	// documented formula:
-	//   net_kw = solar_kw - consumption_kw
-	//          - sum(power_kw for charging assets, power_kw < 0)
-	//          + sum(power_kw for discharging assets, power_kw > 0)
-	// A generous epsilon absorbs floating-point noise from the
-	// simulator's own rounding. Genuine cross-field sanity check, not
-	// just a bounds check - loosen or remove if real traffic trips false
-	// positives.
-	expectedNet := *wire.Readings.SolarKw - *wire.Readings.ConsumptionKw
-	for _, asset := range storageAssets {
-		if asset.PowerKw < 0 {
-			expectedNet -= asset.PowerKw
-		} else {
-			expectedNet += asset.PowerKw
-		}
-	}
-	const netKwEpsilon = 0.05
-	if math.Abs(*wire.Readings.NetKw-expectedNet) > netKwEpsilon {
-		return domain.MeterReading{}, domain.NewValidationError(
-			"readings.net_kw",
-			fmt.Sprintf("does not reconcile with solar/consumption/storage: got %.3f, expected ~%.3f", *wire.Readings.NetKw, expectedNet),
-		)
-	}
+	// A stricter net_kw reconciliation against simulation_plan.md
+	// section 5.4's formula was tried and removed: the doc's own worked
+	// example (solar=2.41, consumption=0.87, two charging batteries,
+	// net_kw=1.54) does not satisfy that formula (would require ~3.34).
+	// Section 5.4's formula likely describes convergence specifically
+	// after a dispatch/actuation command, not the general steady-state
+	// case - but that's not confirmed. net_kw is only checked for
+	// finiteness (above), not cross-field correctness, until this is
+	// clarified with the team.
 
 	var weatherIrradiance, cloudCover *float64
 	if wire.Meta != nil {
@@ -348,10 +333,6 @@ func DecodeHeartbeat(raw []byte) (domain.Heartbeat, error) {
 	if wire.Status == "" {
 		return domain.Heartbeat{}, domain.NewValidationError("status", "required")
 	}
-	// Only "online" is documented/observed on the wire today. Anything
-	// else is rejected rather than silently accepted, so a future new
-	// status value gets a deliberate decision (widen this check) instead
-	// of silently flowing through unvalidated.
 	if wire.Status != "online" {
 		return domain.Heartbeat{}, domain.NewValidationError("status", fmt.Sprintf("unrecognized value %q", wire.Status))
 	}
