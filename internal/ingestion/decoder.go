@@ -333,6 +333,10 @@ func DecodeHeartbeat(raw []byte) (domain.Heartbeat, error) {
 	if wire.Status == "" {
 		return domain.Heartbeat{}, domain.NewValidationError("status", "required")
 	}
+	// Only "online" is documented/observed on the wire today. Anything
+	// else is rejected rather than silently accepted, so a future new
+	// status value gets a deliberate decision (widen this check) instead
+	// of silently flowing through unvalidated.
 	if wire.Status != "online" {
 		return domain.Heartbeat{}, domain.NewValidationError("status", fmt.Sprintf("unrecognized value %q", wire.Status))
 	}
