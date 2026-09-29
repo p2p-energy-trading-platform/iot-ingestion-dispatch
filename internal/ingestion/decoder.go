@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 
@@ -30,15 +29,22 @@ const supportedSchemaVersion = "1.0"
 const (
 	maxClockSkewFuture = 5 * time.Minute
 	maxClockSkewPast   = 24 * time.Hour
-)
 
-var (
-	gridIDPattern  = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
-	houseIDSuffix  = regexp.MustCompile(`^house[0-9]{1,10}$`)
-	assetIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	maxGridIDLen  = 32
+	maxAssetIDLen = 64
+	maxHouseNum   = 10 // max digits in the {N} of {grid_id}-house{N}
 )
 
 // --- private wire structs: JSON shape exactly as the simulator sends it ---
+//
+// Pointer fields below are deliberate, not incidental - see the PR
+// description for the full field-by-field justification. In short: every
+// pointer here exists because 0 is a legitimate value for that field, so
+// only a pointer can distinguish "field present with value 0" from
+// "field missing entirely." capacity_kwh does NOT need one, since our
+// validation already rejects <= 0, so "missing" and "invalid zero"
+// collapse into the same outcome - see decodeStorageAssets/
+// decodeFlexibleAssets.
 
 type meterReadingWire struct {
 	SchemaVersion string             `json:"schema_version"`
@@ -64,7 +70,7 @@ type storageAssetWire struct {
 	AssetType   string   `json:"asset_type"`
 	SocPct      *float64 `json:"soc_pct"`
 	PowerKw     *float64 `json:"power_kw"`
-	CapacityKwh *float64 `json:"capacity_kwh"`
+	CapacityKwh float64  `json:"capacity_kwh"` // no pointer needed: must be > 0, so missing (0) and invalid (0) reject identically
 	PluggedIn   *bool    `json:"plugged_in,omitempty"`
 }
 
@@ -87,7 +93,7 @@ type heartbeatWire struct {
 type flexibleAssetWire struct {
 	AssetID        string   `json:"asset_id"`
 	AssetType      string   `json:"asset_type"`
-	CapacityKwh    *float64 `json:"capacity_kwh"`
+	CapacityKwh    float64  `json:"capacity_kwh"` // see storageAssetWire.CapacityKwh
 	MaxChargeKw    *float64 `json:"max_charge_kw"`
 	MaxDischargeKw *float64 `json:"max_discharge_kw"`
 	V2GCapable     *bool    `json:"v2g_capable,omitempty"`
@@ -107,28 +113,15 @@ func DecodeMeterReading(raw []byte) (domain.MeterReading, error) {
 	if err := validateSchemaVersion(wire.SchemaVersion); err != nil {
 		return domain.MeterReading{}, err
 	}
-
-	if wire.GridID == "" {
-		return domain.MeterReading{}, domain.NewValidationError("grid_id", "required")
-	}
 	if err := validateGridID(wire.GridID); err != nil {
 		return domain.MeterReading{}, err
-	}
-
-	if wire.HouseID == "" {
-		return domain.MeterReading{}, domain.NewValidationError("house_id", "required")
 	}
 	if err := validateHouseID(wire.HouseID, wire.GridID); err != nil {
 		return domain.MeterReading{}, err
 	}
-
-	if wire.MeterID == "" {
-		return domain.MeterReading{}, domain.NewValidationError("meter_id", "required")
-	}
 	if err := validateMeterID(wire.MeterID, wire.HouseID); err != nil {
 		return domain.MeterReading{}, err
 	}
-
 	deviceClass, err := validateDeviceClass(wire.DeviceClass)
 	if err != nil {
 		return domain.MeterReading{}, err
@@ -145,40 +138,25 @@ func DecodeMeterReading(raw []byte) (domain.MeterReading, error) {
 		return domain.MeterReading{}, err
 	}
 
-	if wire.Seq == nil {
-		return domain.MeterReading{}, domain.NewValidationError("seq", "required")
-	}
-	if *wire.Seq < 0 {
-		return domain.MeterReading{}, domain.NewValidationError("seq", "must be >= 0")
+	seq, err := requireNonNegativeInt("seq", wire.Seq)
+	if err != nil {
+		return domain.MeterReading{}, err
 	}
 
 	if wire.Readings == nil {
 		return domain.MeterReading{}, domain.NewValidationError("readings", "required")
 	}
-	if wire.Readings.SolarKw == nil {
-		return domain.MeterReading{}, domain.NewValidationError("readings.solar_kw", "required")
-	}
-	if err := validateFinite("readings.solar_kw", *wire.Readings.SolarKw); err != nil {
+
+	solarKw, err := requireNonNegativeFinite("readings.solar_kw", wire.Readings.SolarKw)
+	if err != nil {
 		return domain.MeterReading{}, err
 	}
-	if *wire.Readings.SolarKw < 0 {
-		return domain.MeterReading{}, domain.NewValidationError("readings.solar_kw", "must be >= 0")
-	}
-
-	if wire.Readings.ConsumptionKw == nil {
-		return domain.MeterReading{}, domain.NewValidationError("readings.consumption_kw", "required")
-	}
-	if err := validateFinite("readings.consumption_kw", *wire.Readings.ConsumptionKw); err != nil {
+	consumptionKw, err := requireNonNegativeFinite("readings.consumption_kw", wire.Readings.ConsumptionKw)
+	if err != nil {
 		return domain.MeterReading{}, err
 	}
-	if *wire.Readings.ConsumptionKw < 0 {
-		return domain.MeterReading{}, domain.NewValidationError("readings.consumption_kw", "must be >= 0")
-	}
-
-	if wire.Readings.NetKw == nil {
-		return domain.MeterReading{}, domain.NewValidationError("readings.net_kw", "required")
-	}
-	if err := validateFinite("readings.net_kw", *wire.Readings.NetKw); err != nil {
+	netKw, err := requireFinite("readings.net_kw", wire.Readings.NetKw)
+	if err != nil {
 		return domain.MeterReading{}, err
 	}
 
@@ -194,25 +172,17 @@ func DecodeMeterReading(raw []byte) (domain.MeterReading, error) {
 	// Section 5.4's formula likely describes convergence specifically
 	// after a dispatch/actuation command, not the general steady-state
 	// case - but that's not confirmed. net_kw is only checked for
-	// finiteness (above), not cross-field correctness, until this is
-	// clarified with the team.
+	// finiteness, not cross-field correctness, until this is clarified.
 
 	var weatherIrradiance, cloudCover *float64
 	if wire.Meta != nil {
-		if wire.Meta.WeatherIrradianceWm2 != nil {
-			if err := validateFinite("meta.weather_irradiance_wm2", *wire.Meta.WeatherIrradianceWm2); err != nil {
-				return domain.MeterReading{}, err
-			}
-			if *wire.Meta.WeatherIrradianceWm2 < 0 {
-				return domain.MeterReading{}, domain.NewValidationError("meta.weather_irradiance_wm2", "must be >= 0")
-			}
-			weatherIrradiance = wire.Meta.WeatherIrradianceWm2
+		weatherIrradiance, err = optionalNonNegativeFinite("meta.weather_irradiance_wm2", wire.Meta.WeatherIrradianceWm2)
+		if err != nil {
+			return domain.MeterReading{}, err
 		}
-		if wire.Meta.CloudCoverPct != nil {
-			if err := validatePercent("meta.cloud_cover_pct", *wire.Meta.CloudCoverPct); err != nil {
-				return domain.MeterReading{}, err
-			}
-			cloudCover = wire.Meta.CloudCoverPct
+		cloudCover, err = optionalPercent("meta.cloud_cover_pct", wire.Meta.CloudCoverPct)
+		if err != nil {
+			return domain.MeterReading{}, err
 		}
 	}
 
@@ -223,10 +193,10 @@ func DecodeMeterReading(raw []byte) (domain.MeterReading, error) {
 		GridID:               wire.GridID,
 		DeviceClass:          deviceClass,
 		EventTime:            eventTime,
-		Seq:                  *wire.Seq,
-		SolarKw:              *wire.Readings.SolarKw,
-		ConsumptionKw:        *wire.Readings.ConsumptionKw,
-		NetKw:                *wire.Readings.NetKw,
+		Seq:                  seq,
+		SolarKw:              solarKw,
+		ConsumptionKw:        consumptionKw,
+		NetKw:                netKw,
 		StorageAssets:        storageAssets,
 		WeatherIrradianceWm2: weatherIrradiance,
 		CloudCoverPct:        cloudCover,
@@ -240,11 +210,8 @@ func decodeStorageAssets(wireAssets []storageAssetWire) ([]domain.StorageAssetRe
 	for i, a := range wireAssets {
 		field := fmt.Sprintf("readings.storage_assets[%d]", i)
 
-		if a.AssetID == "" {
-			return nil, domain.NewValidationError(field+".asset_id", "required")
-		}
-		if !assetIDPattern.MatchString(a.AssetID) {
-			return nil, domain.NewValidationError(field+".asset_id", "invalid characters")
+		if err := validateAssetID(field+".asset_id", a.AssetID); err != nil {
+			return nil, err
 		}
 		if seen[a.AssetID] {
 			return nil, domain.NewValidationError(field+".asset_id", "duplicate asset_id in storage_assets")
@@ -256,41 +223,41 @@ func decodeStorageAssets(wireAssets []storageAssetWire) ([]domain.StorageAssetRe
 			return nil, err
 		}
 
-		if a.SocPct == nil {
-			return nil, domain.NewValidationError(field+".soc_pct", "required")
-		}
-		if err := validatePercent(field+".soc_pct", *a.SocPct); err != nil {
+		socPct, err := requirePercent(field+".soc_pct", a.SocPct)
+		if err != nil {
 			return nil, err
 		}
-
-		if a.PowerKw == nil {
-			return nil, domain.NewValidationError(field+".power_kw", "required")
-		}
-		if err := validateFinite(field+".power_kw", *a.PowerKw); err != nil {
+		powerKw, err := requireFinite(field+".power_kw", a.PowerKw)
+		if err != nil {
 			return nil, err
 		}
-
-		if a.CapacityKwh == nil {
-			return nil, domain.NewValidationError(field+".capacity_kwh", "required")
-		}
-		if err := validateFinite(field+".capacity_kwh", *a.CapacityKwh); err != nil {
+		if err := validateFinite(field+".capacity_kwh", a.CapacityKwh); err != nil {
 			return nil, err
 		}
-		if *a.CapacityKwh <= 0 {
-			return nil, domain.NewValidationError(field+".capacity_kwh", "must be > 0")
+		if a.CapacityKwh <= 0 {
+			return nil, domain.NewValidationError(field+".capacity_kwh", "required, must be > 0")
 		}
 
 		if err := validateCapabilityField(field+".plugged_in", assetType, a.PluggedIn != nil); err != nil {
 			return nil, err
 		}
 
+		// Reallocate rather than reuse the wire struct's pointer, so the
+		// domain type never holds memory owned by a temporary decode
+		// struct.
+		var pluggedIn *bool
+		if a.PluggedIn != nil {
+			v := *a.PluggedIn
+			pluggedIn = &v
+		}
+
 		assets = append(assets, domain.StorageAssetReading{
 			AssetID:     a.AssetID,
 			AssetType:   assetType,
-			SocPct:      *a.SocPct,
-			PowerKw:     *a.PowerKw,
-			CapacityKwh: *a.CapacityKwh,
-			PluggedIn:   a.PluggedIn,
+			SocPct:      socPct,
+			PowerKw:     powerKw,
+			CapacityKwh: a.CapacityKwh,
+			PluggedIn:   pluggedIn,
 		})
 	}
 
@@ -308,23 +275,11 @@ func DecodeHeartbeat(raw []byte) (domain.Heartbeat, error) {
 	if err := validateSchemaVersion(wire.SchemaVersion); err != nil {
 		return domain.Heartbeat{}, err
 	}
-
-	if wire.GridID == "" {
-		return domain.Heartbeat{}, domain.NewValidationError("grid_id", "required")
-	}
 	if err := validateGridID(wire.GridID); err != nil {
 		return domain.Heartbeat{}, err
 	}
-
-	if wire.HouseID == "" {
-		return domain.Heartbeat{}, domain.NewValidationError("house_id", "required")
-	}
 	if err := validateHouseID(wire.HouseID, wire.GridID); err != nil {
 		return domain.Heartbeat{}, err
-	}
-
-	if wire.MeterID == "" {
-		return domain.Heartbeat{}, domain.NewValidationError("meter_id", "required")
 	}
 	if err := validateMeterID(wire.MeterID, wire.HouseID); err != nil {
 		return domain.Heartbeat{}, err
@@ -346,14 +301,9 @@ func DecodeHeartbeat(raw []byte) (domain.Heartbeat, error) {
 		return domain.Heartbeat{}, err
 	}
 
-	if wire.RatedSolarKw == nil {
-		return domain.Heartbeat{}, domain.NewValidationError("rated_solar_kw", "required")
-	}
-	if err := validateFinite("rated_solar_kw", *wire.RatedSolarKw); err != nil {
+	ratedSolarKw, err := requireNonNegativeFinite("rated_solar_kw", wire.RatedSolarKw)
+	if err != nil {
 		return domain.Heartbeat{}, err
-	}
-	if *wire.RatedSolarKw < 0 {
-		return domain.Heartbeat{}, domain.NewValidationError("rated_solar_kw", "must be >= 0")
 	}
 
 	flexibleAssets, err := decodeFlexibleAssets(wire.FlexibleAssets)
@@ -368,7 +318,7 @@ func DecodeHeartbeat(raw []byte) (domain.Heartbeat, error) {
 		MeterID:        wire.MeterID,
 		Status:         wire.Status,
 		DeviceClass:    deviceClass,
-		RatedSolarKw:   *wire.RatedSolarKw,
+		RatedSolarKw:   ratedSolarKw,
 		FlexibleAssets: flexibleAssets,
 	}, nil
 }
@@ -380,11 +330,8 @@ func decodeFlexibleAssets(wireAssets []flexibleAssetWire) ([]domain.FlexibleAsse
 	for i, a := range wireAssets {
 		field := fmt.Sprintf("flexible_assets[%d]", i)
 
-		if a.AssetID == "" {
-			return nil, domain.NewValidationError(field+".asset_id", "required")
-		}
-		if !assetIDPattern.MatchString(a.AssetID) {
-			return nil, domain.NewValidationError(field+".asset_id", "invalid characters")
+		if err := validateAssetID(field+".asset_id", a.AssetID); err != nil {
+			return nil, err
 		}
 		if seen[a.AssetID] {
 			return nil, domain.NewValidationError(field+".asset_id", "duplicate asset_id in flexible_assets")
@@ -396,47 +343,39 @@ func decodeFlexibleAssets(wireAssets []flexibleAssetWire) ([]domain.FlexibleAsse
 			return nil, err
 		}
 
-		if a.CapacityKwh == nil {
-			return nil, domain.NewValidationError(field+".capacity_kwh", "required")
-		}
-		if err := validateFinite(field+".capacity_kwh", *a.CapacityKwh); err != nil {
+		if err := validateFinite(field+".capacity_kwh", a.CapacityKwh); err != nil {
 			return nil, err
 		}
-		if *a.CapacityKwh <= 0 {
-			return nil, domain.NewValidationError(field+".capacity_kwh", "must be > 0")
+		if a.CapacityKwh <= 0 {
+			return nil, domain.NewValidationError(field+".capacity_kwh", "required, must be > 0")
 		}
 
-		if a.MaxChargeKw == nil {
-			return nil, domain.NewValidationError(field+".max_charge_kw", "required")
-		}
-		if err := validateFinite(field+".max_charge_kw", *a.MaxChargeKw); err != nil {
+		maxChargeKw, err := requireNonNegativeFinite(field+".max_charge_kw", a.MaxChargeKw)
+		if err != nil {
 			return nil, err
 		}
-		if *a.MaxChargeKw < 0 {
-			return nil, domain.NewValidationError(field+".max_charge_kw", "must be >= 0")
-		}
-
-		if a.MaxDischargeKw == nil {
-			return nil, domain.NewValidationError(field+".max_discharge_kw", "required")
-		}
-		if err := validateFinite(field+".max_discharge_kw", *a.MaxDischargeKw); err != nil {
+		maxDischargeKw, err := requireNonNegativeFinite(field+".max_discharge_kw", a.MaxDischargeKw)
+		if err != nil {
 			return nil, err
-		}
-		if *a.MaxDischargeKw < 0 {
-			return nil, domain.NewValidationError(field+".max_discharge_kw", "must be >= 0")
 		}
 
 		if err := validateCapabilityField(field+".v2g_capable", assetType, a.V2GCapable != nil); err != nil {
 			return nil, err
 		}
 
+		var v2gCapable *bool
+		if a.V2GCapable != nil {
+			v := *a.V2GCapable
+			v2gCapable = &v
+		}
+
 		assets = append(assets, domain.FlexibleAsset{
 			AssetID:        a.AssetID,
 			AssetType:      assetType,
-			CapacityKwh:    *a.CapacityKwh,
-			MaxChargeKw:    *a.MaxChargeKw,
-			MaxDischargeKw: *a.MaxDischargeKw,
-			V2GCapable:     a.V2GCapable,
+			CapacityKwh:    a.CapacityKwh,
+			MaxChargeKw:    maxChargeKw,
+			MaxDischargeKw: maxDischargeKw,
+			V2GCapable:     v2gCapable,
 		})
 	}
 
@@ -444,6 +383,8 @@ func decodeFlexibleAssets(wireAssets []flexibleAssetWire) ([]domain.FlexibleAsse
 }
 
 // --- shared field validators ---
+// Each validator owns its own "required" check - callers never need a
+// separate empty-string guard before calling one of these.
 
 func validateSchemaVersion(v string) error {
 	if v == "" {
@@ -456,33 +397,77 @@ func validateSchemaVersion(v string) error {
 }
 
 func validateGridID(gridID string) error {
-	if !gridIDPattern.MatchString(gridID) {
-		return domain.NewValidationError("grid_id", "must be lowercase alphanumeric")
+	if gridID == "" {
+		return domain.NewValidationError("grid_id", "required")
+	}
+	if len(gridID) > maxGridIDLen {
+		return domain.NewValidationError("grid_id", fmt.Sprintf("must be at most %d characters", maxGridIDLen))
+	}
+	for i := 0; i < len(gridID); i++ {
+		if !isLowerAlnum(gridID[i]) {
+			return domain.NewValidationError("grid_id", "must be lowercase alphanumeric")
+		}
 	}
 	return nil
 }
 
 func validateHouseID(houseID, gridID string) error {
-	prefix := gridID + "-"
-	if !strings.HasPrefix(houseID, prefix) {
-		return domain.NewValidationError("house_id", fmt.Sprintf("must start with grid_id prefix %q", prefix))
+	if houseID == "" {
+		return domain.NewValidationError("house_id", "required")
 	}
-	suffix := strings.TrimPrefix(houseID, prefix)
-	if !houseIDSuffix.MatchString(suffix) {
+	// gridID is validated separately (validateGridID); here we only
+	// check houseID's own shape relative to it. Slicing below never
+	// allocates - a string slice is just a new header over the same
+	// bytes.
+	if !strings.HasPrefix(houseID, gridID) || len(houseID) <= len(gridID) || houseID[len(gridID)] != '-' {
+		return domain.NewValidationError("house_id", "must start with grid_id prefix followed by '-'")
+	}
+	suffix := houseID[len(gridID)+1:]
+	if !strings.HasPrefix(suffix, "house") {
 		return domain.NewValidationError("house_id", "must match {grid_id}-house{N}")
+	}
+	digits := suffix[len("house"):]
+	if digits == "" || len(digits) > maxHouseNum {
+		return domain.NewValidationError("house_id", "must match {grid_id}-house{N}")
+	}
+	for i := 0; i < len(digits); i++ {
+		if !isDigit(digits[i]) {
+			return domain.NewValidationError("house_id", "must match {grid_id}-house{N}")
+		}
 	}
 	return nil
 }
 
 func validateMeterID(meterID, houseID string) error {
-	expected := "meter-" + houseID
-	if meterID != expected {
-		return domain.NewValidationError("meter_id", fmt.Sprintf("must equal %q", expected))
+	if meterID == "" {
+		return domain.NewValidationError("meter_id", "required")
+	}
+	const prefix = "meter-"
+	if !strings.HasPrefix(meterID, prefix) || meterID[len(prefix):] != houseID {
+		return domain.NewValidationError("meter_id", `must equal "meter-"+house_id`)
+	}
+	return nil
+}
+
+func validateAssetID(field, assetID string) error {
+	if assetID == "" {
+		return domain.NewValidationError(field, "required")
+	}
+	if len(assetID) > maxAssetIDLen {
+		return domain.NewValidationError(field, fmt.Sprintf("must be at most %d characters", maxAssetIDLen))
+	}
+	for i := 0; i < len(assetID); i++ {
+		if !isAssetIDChar(assetID[i]) {
+			return domain.NewValidationError(field, "invalid characters")
+		}
 	}
 	return nil
 }
 
 func validateDeviceClass(v string) (domain.DeviceClass, error) {
+	if v == "" {
+		return "", domain.NewValidationError("device_class", "required")
+	}
 	switch domain.DeviceClass(v) {
 	case domain.DeviceClassConsumer, domain.DeviceClassResidentialProsumer, domain.DeviceClassCommercial:
 		return domain.DeviceClass(v), nil
@@ -492,6 +477,9 @@ func validateDeviceClass(v string) (domain.DeviceClass, error) {
 }
 
 func validateAssetType(field, v string) (domain.AssetType, error) {
+	if v == "" {
+		return "", domain.NewValidationError(field, "required")
+	}
 	switch domain.AssetType(v) {
 	case domain.AssetTypeBESS, domain.AssetTypeEV:
 		return domain.AssetType(v), nil
@@ -525,16 +513,6 @@ func validateFinite(field string, v float64) error {
 	return nil
 }
 
-func validatePercent(field string, v float64) error {
-	if err := validateFinite(field, v); err != nil {
-		return err
-	}
-	if v < 0 || v > 100 {
-		return domain.NewValidationError(field, "must be between 0 and 100")
-	}
-	return nil
-}
-
 func validateClockSkew(eventTime time.Time) error {
 	now := time.Now().UTC()
 	if eventTime.After(now.Add(maxClockSkewFuture)) {
@@ -544,4 +522,86 @@ func validateClockSkew(eventTime time.Time) error {
 		return domain.NewValidationError("timestamp", fmt.Sprintf("too far in the past (max skew %s)", maxClockSkewPast))
 	}
 	return nil
+}
+
+// --- required/optional numeric helpers ---
+// Each pairs presence-checking with the finite/range check, so call
+// sites collapse from several lines to one.
+
+func requireFinite(field string, v *float64) (float64, error) {
+	if v == nil {
+		return 0, domain.NewValidationError(field, "required")
+	}
+	if err := validateFinite(field, *v); err != nil {
+		return 0, err
+	}
+	return *v, nil
+}
+
+func requireNonNegativeFinite(field string, v *float64) (float64, error) {
+	val, err := requireFinite(field, v)
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		return 0, domain.NewValidationError(field, "must be >= 0")
+	}
+	return val, nil
+}
+
+func requirePercent(field string, v *float64) (float64, error) {
+	val, err := requireFinite(field, v)
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 || val > 100 {
+		return 0, domain.NewValidationError(field, "must be between 0 and 100")
+	}
+	return val, nil
+}
+
+func requireNonNegativeInt(field string, v *int64) (int64, error) {
+	if v == nil {
+		return 0, domain.NewValidationError(field, "required")
+	}
+	if *v < 0 {
+		return 0, domain.NewValidationError(field, "must be >= 0")
+	}
+	return *v, nil
+}
+
+func optionalNonNegativeFinite(field string, v *float64) (*float64, error) {
+	if v == nil {
+		return nil, nil
+	}
+	val, err := requireNonNegativeFinite(field, v)
+	if err != nil {
+		return nil, err
+	}
+	return &val, nil // &val addresses this function's own local copy, not v
+}
+
+func optionalPercent(field string, v *float64) (*float64, error) {
+	if v == nil {
+		return nil, nil
+	}
+	val, err := requirePercent(field, v)
+	if err != nil {
+		return nil, err
+	}
+	return &val, nil
+}
+
+// --- byte-level character checks (no regexp) ---
+
+func isLowerAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+func isAssetIDChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
