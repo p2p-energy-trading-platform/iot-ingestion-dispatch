@@ -15,13 +15,15 @@ import (
 )
 
 type App struct {
-	config   *config.Config
-	logger   *slog.Logger
-	postgres *postgresstore.Store
-	redis    *redisstore.Store
-	consumer *ingestion.Consumer
-	grpc     *grpctransport.Server
-	health   *httphealth.Server
+	config       *config.Config
+	logger       *slog.Logger
+	postgres     *postgresstore.Store
+	redis        *redisstore.Store
+	consumer     *ingestion.Consumer
+	consumerDone chan struct{}
+	router       *ingestion.Router
+	grpc         *grpctransport.Server
+	health       *httphealth.Server
 
 	admissionRegistry  *admission.Registry
 	admissionRefresher *admission.Refresher
@@ -50,6 +52,8 @@ func New(
 		return nil, fmt.Errorf("redis: %w", err)
 	}
 
+	router := ingestion.NewRouter()
+
 	consumer, err := ingestion.NewConsumer(
 		ingestion.Config{
 			Brokers:        config.Kafka.Brokers,
@@ -57,6 +61,8 @@ func New(
 			MeterTopic:     config.Kafka.MeterTopic,
 			HeartbeatTopic: config.Kafka.HeartbeatTopic,
 		},
+		router,
+		logger,
 	)
 	if err != nil {
 		_ = redis.Close()
@@ -91,6 +97,7 @@ func New(
 		postgres: postgres,
 		redis:    redis,
 		consumer: consumer,
+		router:   router,
 		grpc:     grpcServer,
 		health:   healthServer,
 
