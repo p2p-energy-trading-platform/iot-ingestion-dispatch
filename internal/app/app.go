@@ -52,7 +52,38 @@ func New(
 		return nil, fmt.Errorf("redis: %w", err)
 	}
 
+	// postgres satisfies admission.GridLoader directly (see
+	// internal/store/postgres/grid_loader.go's LoadGrids method) - no
+	// separate loader type needed.
+	admissionRegistry := admission.NewRegistry()
+	admissionRefresher := admission.NewRefresher(
+		admissionRegistry,
+		postgres,
+		admission.RefresherConfig{
+			Interval: config.Admission.RefreshInterval,
+		},
+		logger,
+	)
+
+	// Handlers are registered before the consumer exists, so the router is
+	// complete before anything can dispatch to it. A shared topic name would
+	// make the second Register silently replace the first, so reject it.
+	if config.Kafka.MeterTopic == config.Kafka.HeartbeatTopic {
+		_ = redis.Close()
+		postgres.Close()
+		return nil, fmt.Errorf("kafka: meter and heartbeat topics must differ, both are %q",
+			config.Kafka.MeterTopic)
+	}
+
 	router := ingestion.NewRouter()
+	router.Register(
+		config.Kafka.MeterTopic,
+		ingestion.NewMeterHandler(admissionRegistry, postgres, redis, logger),
+	)
+	router.Register(
+		config.Kafka.HeartbeatTopic,
+		ingestion.NewHeartbeatHandler(admissionRegistry, postgres, redis, logger),
+	)
 
 	consumer, err := ingestion.NewConsumer(
 		ingestion.Config{
@@ -76,19 +107,6 @@ func New(
 
 	healthServer := httphealth.New(
 		config.Health.Address,
-	)
-
-	// postgres satisfies admission.GridLoader directly (see
-	// internal/store/postgres/grid_loader.go's LoadGrids method) - no
-	// separate loader type needed.
-	admissionRegistry := admission.NewRegistry()
-	admissionRefresher := admission.NewRefresher(
-		admissionRegistry,
-		postgres,
-		admission.RefresherConfig{
-			Interval: config.Admission.RefreshInterval,
-		},
-		logger,
 	)
 
 	return &App{
