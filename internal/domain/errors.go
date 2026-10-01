@@ -30,3 +30,8 @@ func (e *ValidationError) Unwrap() error {
 func NewValidationError(field, reason string) error {
 	return &ValidationError{Field: field, Reason: reason}
 }
+
+// ErrIntegrityConflict marks a record whose identity already exists in
+// durable history with different values. Retrying can never fix it and
+// history is never overwritten, so PETPG-226 should treat it as permanent.
+var ErrIntegrityConflict = errors.New("domain: conflicting duplicate telemetry")
