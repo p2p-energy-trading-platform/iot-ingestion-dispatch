@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health" 
-	"google.golang.org/grpc/health/grpc_health_v1" 
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
 const gracefulStopTimeout = 5 * time.Second
@@ -15,7 +15,7 @@ const gracefulStopTimeout = 5 * time.Second
 type Server struct {
 	address string
 	server  *grpc.Server
-	health  *health.Server 
+	health  *health.Server
 }
 
 func New(address string) *Server {
@@ -34,7 +34,7 @@ func New(address string) *Server {
 	return &Server{
 		address: address,
 		server:  server,
-		health:  healthServer, 
+		health:  healthServer,
 	}
 }
 
@@ -62,7 +62,6 @@ func (server *Server) SetReady(ready bool) {
 	server.health.SetServingStatus("", status)
 }
 
-
 func (server *Server) Stop() {
 
 	stopped := make(chan struct{})
@@ -72,18 +71,17 @@ func (server *Server) Stop() {
 		close(stopped)
 	}()
 
-	
 	timer := time.NewTimer(gracefulStopTimeout)
 	defer timer.Stop()
 
 	select {
-		case <-stopped:
-			
-			return
-		case <-timer.C:
-			
-			server.server.Stop()
-			<-stopped
+	case <-stopped:
+
+		return
+	case <-timer.C:
+
+		server.server.Stop()
+		<-stopped
 	}
 
 }
