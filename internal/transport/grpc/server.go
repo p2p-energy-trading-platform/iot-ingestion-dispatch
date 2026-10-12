@@ -71,8 +71,8 @@ func (server *Server) Stop() {
 	stopped := make(chan struct{})
 
 	go func() {
+		defer close(stopped)
 		server.server.GracefulStop()
-		close(stopped)
 	}()
 
 	timer := time.NewTimer(gracefulStopTimeout)
@@ -80,10 +80,10 @@ func (server *Server) Stop() {
 
 	select {
 	case <-stopped:
-
+		server.logger.Info("gRPC server stopped gracefully")
 		return
 	case <-timer.C:
-
+		server.logger.Warn("gRPC graceful shutdown timed out, forcing stop")
 		server.server.Stop()
 		<-stopped
 	}
