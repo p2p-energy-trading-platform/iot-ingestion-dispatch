@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -16,9 +17,10 @@ type Server struct {
 	address string
 	server  *grpc.Server
 	health  *health.Server
+	logger  *slog.Logger
 }
 
-func New(address string) *Server {
+func New(address string, logger *slog.Logger) *Server {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(4 << 20),
 	)
@@ -44,6 +46,8 @@ func (server *Server) Run() error {
 	if err != nil {
 		return fmt.Errorf("listen grpc: %w", err)
 	}
+
+	server.logger.Info("starting gRPC server", "address", server.address)
 
 	if err := server.server.Serve(listener); err != nil {
 		return fmt.Errorf("serve grpc: %w", err)

@@ -103,6 +103,7 @@ func New(
 
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,
+		logger,
 	)
 
 	healthServer := httphealth.New(
