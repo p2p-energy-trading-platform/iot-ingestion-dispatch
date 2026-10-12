@@ -71,6 +71,7 @@ func (app *App) Run(ctx context.Context) error {
 	// Step 7: only after grid registry bootstrap has succeeded and the
 	// Kafka consumer is running is ingestion allowed to be reported ready.
 	app.health.SetReady(true)
+	app.grpc.SetReady(true)
 	app.logger.Info("ingestion readiness enabled")
 
 	var runErr error

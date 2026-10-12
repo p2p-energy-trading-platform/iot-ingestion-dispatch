@@ -26,6 +26,7 @@ func (app *App) shutdown() error {
 	var errs []error
 
 	app.health.SetReady(false)
+	app.grpc.SetReady(false)
 
 	// The run context is already cancelled by the time we get here, so Run
 	// is returning; wait for it, then close the client. Closing stops

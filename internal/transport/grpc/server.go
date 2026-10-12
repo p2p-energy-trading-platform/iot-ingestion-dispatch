@@ -2,24 +2,46 @@ package grpc
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 )
+
+const gracefulStopTimeout = 5 * time.Second
 
 type Server struct {
 	address string
 	server  *grpc.Server
+	health  *health.Server
+	logger  *slog.Logger
 }
 
-func New(address string) *Server {
+func New(address string, logger *slog.Logger) *Server {
 	server := grpc.NewServer(
-		grpc.MaxRecvMsgSize(4 << 20),
+		grpc.MaxRecvMsgSize(4<<20),
+		grpc.MaxSendMsgSize(4<<20),
+		grpc.ChainUnaryInterceptor(
+			UnaryServerRecovery(logger),
+			UnaryServerLogger(logger),
+		),
+	)
+
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(server, healthServer)
+
+	healthServer.SetServingStatus(
+		"",
+		grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	)
 
 	return &Server{
 		address: address,
 		server:  server,
+		health:  healthServer,
 	}
 }
 
@@ -30,6 +52,8 @@ func (server *Server) Run() error {
 		return fmt.Errorf("listen grpc: %w", err)
 	}
 
+	server.logger.Info("starting gRPC server", "address", server.address)
+
 	if err := server.server.Serve(listener); err != nil {
 		return fmt.Errorf("serve grpc: %w", err)
 	}
@@ -37,6 +61,36 @@ func (server *Server) Run() error {
 	return nil
 }
 
+func (server *Server) SetReady(ready bool) {
+	status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
+
+	if ready {
+		status = grpc_health_v1.HealthCheckResponse_SERVING
+	}
+
+	server.health.SetServingStatus("", status)
+}
+
 func (server *Server) Stop() {
-	server.server.GracefulStop()
+
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+		server.server.GracefulStop()
+	}()
+
+	timer := time.NewTimer(gracefulStopTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-stopped:
+		server.logger.Info("gRPC server stopped gracefully")
+		return
+	case <-timer.C:
+		server.logger.Warn("gRPC graceful shutdown timed out, forcing stop")
+		server.server.Stop()
+		<-stopped
+	}
+
 }
