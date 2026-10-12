@@ -22,7 +22,12 @@ type Server struct {
 
 func New(address string, logger *slog.Logger) *Server {
 	server := grpc.NewServer(
-		grpc.MaxRecvMsgSize(4 << 20),
+		grpc.MaxRecvMsgSize(4<<20),
+		grpc.MaxSendMsgSize(4<<20),
+		grpc.ChainUnaryInterceptor(
+			UnaryServerRecovery(logger),
+			UnaryServerLogger(logger),
+		),
 	)
 
 	healthServer := health.NewServer()
