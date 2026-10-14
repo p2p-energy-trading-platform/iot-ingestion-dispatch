@@ -162,6 +162,16 @@ func (f hbFixture) houseLastHeartbeat(t *testing.T, houseID string) time.Time {
 	return ts
 }
 
+func (f hbFixture) houseMeterID(t *testing.T, houseID string) string {
+	t.Helper()
+	var meterID string
+	if err := f.store.pool.QueryRow(context.Background(),
+		`SELECT meter_id FROM iot_data.houses WHERE house_id = $1`, houseID).Scan(&meterID); err != nil {
+		t.Fatal(err)
+	}
+	return meterID
+}
+
 func (f hbFixture) count(t *testing.T, query string, args ...any) int {
 	t.Helper()
 	var n int
@@ -182,6 +192,9 @@ func TestApplyHeartbeatRecordsUnknownAssetAsDiscoveredNotRegistered(t *testing.T
 
 	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(at) {
 		t.Fatalf("house last_heartbeat_at = %v, want %v", got, at)
+	}
+	if got := f.houseMeterID(t, f.houseID); got != "meter-"+f.houseID {
+		t.Fatalf("house meter_id = %q, want %q", got, "meter-"+f.houseID)
 	}
 
 	d := f.discovered(t, id)
@@ -354,6 +367,13 @@ func TestApplyHeartbeatHouseIdentityMismatchIsConflict(t *testing.T) {
 	err := f.store.ApplyHeartbeat(ctx, changed, at.Add(time.Minute))
 	if !errors.Is(err, domain.ErrIntegrityConflict) {
 		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
+	}
+
+	changed = f.heartbeat(f.houseID)
+	changed.MeterID = "meter-other"
+	err = f.store.ApplyHeartbeat(ctx, changed, at.Add(2*time.Minute))
+	if !errors.Is(err, domain.ErrIntegrityConflict) {
+		t.Fatalf("meter ID mismatch error = %v, want ErrIntegrityConflict", err)
 	}
 }
 

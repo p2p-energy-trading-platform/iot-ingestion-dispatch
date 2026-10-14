@@ -18,12 +18,12 @@ const pgForeignKeyViolation = "23503"
 // last_heartbeat_at, never from status.
 const insertHouseSQL = `
 INSERT INTO iot_data.houses
-    (house_id, grid_id, device_class, rated_solar_kw, status, first_seen_at, last_heartbeat_at)
-VALUES ($1, $2, $3, $4, $5, $6, $6)
+    (house_id, grid_id, device_class, rated_solar_kw, status, first_seen_at, last_heartbeat_at, meter_id)
+VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
 ON CONFLICT (house_id) DO NOTHING`
 
 const selectHouseForUpdateSQL = `
-SELECT grid_id, device_class
+SELECT grid_id, device_class, COALESCE(meter_id, '')
 FROM iot_data.houses
 WHERE house_id = $1
 FOR UPDATE`
@@ -31,7 +31,8 @@ FOR UPDATE`
 const updateHouseSQL = `
 UPDATE iot_data.houses
 SET rated_solar_kw    = $2,
-    last_heartbeat_at = GREATEST(last_heartbeat_at, $3)
+    last_heartbeat_at = GREATEST(last_heartbeat_at, $3),
+    meter_id          = COALESCE(meter_id, $4)
 WHERE house_id = $1`
 
 // Authoritative registry. Heartbeats may read it and refresh capability
@@ -103,7 +104,7 @@ func (store *Store) ApplyHeartbeat(ctx context.Context, hb domain.Heartbeat, rec
 
 func applyHouse(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt time.Time) error {
 	tag, err := tx.Exec(ctx, insertHouseSQL,
-		hb.HouseID, hb.GridID, string(hb.DeviceClass), hb.RatedSolarKw, hb.Status, receivedAt)
+		hb.HouseID, hb.GridID, string(hb.DeviceClass), hb.RatedSolarKw, hb.Status, receivedAt, hb.MeterID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation {
@@ -115,16 +116,16 @@ func applyHouse(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt 
 		return nil // newly discovered; liveness already set by the insert
 	}
 
-	var gridID, deviceClass string
-	if err := tx.QueryRow(ctx, selectHouseForUpdateSQL, hb.HouseID).Scan(&gridID, &deviceClass); err != nil {
+	var gridID, deviceClass, meterID string
+	if err := tx.QueryRow(ctx, selectHouseForUpdateSQL, hb.HouseID).Scan(&gridID, &deviceClass, &meterID); err != nil {
 		return fmt.Errorf("load house %q: %w", hb.HouseID, err)
 	}
-	if gridID != hb.GridID || deviceClass != string(hb.DeviceClass) {
-		return fmt.Errorf("%w: house %q is registered as grid %q class %q, heartbeat says grid %q class %q",
-			domain.ErrIntegrityConflict, hb.HouseID, gridID, deviceClass, hb.GridID, hb.DeviceClass)
+	if gridID != hb.GridID || deviceClass != string(hb.DeviceClass) || (meterID != "" && meterID != hb.MeterID) {
+		return fmt.Errorf("%w: house %q is registered as grid %q class %q meter %q, heartbeat says grid %q class %q meter %q",
+			domain.ErrIntegrityConflict, hb.HouseID, gridID, deviceClass, meterID, hb.GridID, hb.DeviceClass, hb.MeterID)
 	}
 
-	if _, err := tx.Exec(ctx, updateHouseSQL, hb.HouseID, hb.RatedSolarKw, receivedAt); err != nil {
+	if _, err := tx.Exec(ctx, updateHouseSQL, hb.HouseID, hb.RatedSolarKw, receivedAt, hb.MeterID); err != nil {
 		return fmt.Errorf("update house %q: %w", hb.HouseID, err)
 	}
 	return nil
