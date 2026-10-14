@@ -34,20 +34,40 @@ SET rated_solar_kw    = $2,
     last_heartbeat_at = GREATEST(last_heartbeat_at, $3)
 WHERE house_id = $1`
 
-const selectAssetsForUpdateSQL = `
+// Authoritative registry. Heartbeats may read it and refresh capability
+// fields, but never insert rows or change house_id or asset_type.
+const selectRegisteredAssetsSQL = `
 SELECT asset_id, house_id, asset_type, capacity_kwh, max_charge_kw, max_discharge_kw, v2g_capable
 FROM iot_data.flexible_assets
 WHERE asset_id = ANY($1)
 FOR UPDATE`
 
-const insertAssetSQL = `
-INSERT INTO iot_data.flexible_assets
-    (asset_id, house_id, asset_type, capacity_kwh, max_charge_kw, max_discharge_kw,
-     v2g_capable, first_seen_at, last_seen_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`
-
-const updateAssetSQL = `
+const updateRegisteredAssetSQL = `
 UPDATE iot_data.flexible_assets
+SET capacity_kwh     = $2,
+    max_charge_kw    = $3,
+    max_discharge_kw = $4,
+    v2g_capable      = $5,
+    last_seen_at     = GREATEST(last_seen_at, $6)
+WHERE asset_id = $1`
+
+// Observations. This is the only place a heartbeat may record an asset that
+// has no registration.
+const selectDiscoveredAssetsSQL = `
+SELECT asset_id, observed_house_id, asset_type, capacity_kwh, max_charge_kw, max_discharge_kw, v2g_capable
+FROM iot_data.discovered_assets
+WHERE asset_id = ANY($1)
+FOR UPDATE`
+
+const insertDiscoveredAssetSQL = `
+INSERT INTO iot_data.discovered_assets
+    (asset_id, observed_house_id, asset_type, capacity_kwh, max_charge_kw, max_discharge_kw,
+     v2g_capable, first_seen_at, last_seen_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+ON CONFLICT (asset_id) DO NOTHING`
+
+const updateDiscoveredAssetSQL = `
+UPDATE iot_data.discovered_assets
 SET capacity_kwh     = $2,
     max_charge_kw    = $3,
     max_discharge_kw = $4,
@@ -57,11 +77,19 @@ WHERE asset_id = $1`
 
 // ApplyHeartbeat runs the Postgres half of the heartbeat workflow in one
 // transaction: validate or discover the house and refresh its liveness, then
-// validate asset ownership and write only assets that are new or changed.
+// handle each reported asset without ever granting it anything.
 //
-// Identity conflicts (house grid/device class, asset owner/type) return
-// domain.ErrIntegrityConflict and write nothing. Other errors are
-// infrastructure failures and safe to retry.
+//   - registered asset: validated against its house; capability fields are
+//     updated only when they changed
+//   - previously observed asset: same rules, against the observation
+//   - unknown asset: recorded in discovered_assets only. A heartbeat never
+//     inserts into flexible_assets, so it cannot grant ownership, trading,
+//     dispatch or settlement eligibility, or user consent.
+//
+// An asset tied to a different house, or reported with a different type, is a
+// permanent identity conflict: domain.ErrIntegrityConflict, and the whole
+// transaction rolls back. Other errors are infrastructure failures and safe
+// to retry.
 func (store *Store) ApplyHeartbeat(ctx context.Context, hb domain.Heartbeat, receivedAt time.Time) error {
 	receivedAt = receivedAt.UTC().Truncate(time.Microsecond)
 
@@ -107,6 +135,18 @@ type storedAsset struct {
 	asset   domain.FlexibleAsset
 }
 
+// assetSource says where a known asset lives, so the same validation and
+// capability-refresh logic serves both the registry and the observations.
+type assetSource struct {
+	relation  string // used in conflict messages: "<asset> is <relation> house X"
+	updateSQL string
+}
+
+var (
+	registeredSource = assetSource{relation: "registered to", updateSQL: updateRegisteredAssetSQL}
+	discoveredSource = assetSource{relation: "observed under", updateSQL: updateDiscoveredAssetSQL}
+)
+
 func applyAssets(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt time.Time) error {
 	if len(hb.FlexibleAssets) == 0 {
 		return nil
@@ -117,40 +157,49 @@ func applyAssets(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt
 		ids[i] = a.AssetID
 	}
 
-	existing, err := loadAssets(ctx, tx, ids)
+	registered, err := loadAssets(ctx, tx, selectRegisteredAssetsSQL, ids)
 	if err != nil {
 		return err
 	}
 
+	// Only assets without a registration can be discovery observations.
+	var unknownIDs []string
+	for _, a := range hb.FlexibleAssets {
+		if _, ok := registered[a.AssetID]; !ok {
+			unknownIDs = append(unknownIDs, a.AssetID)
+		}
+	}
+
+	discovered := map[string]storedAsset{}
+	if len(unknownIDs) > 0 {
+		discovered, err = loadAssets(ctx, tx, selectDiscoveredAssetsSQL, unknownIDs)
+		if err != nil {
+			return err
+		}
+	}
+
 	for _, incoming := range hb.FlexibleAssets {
-		stored, found := existing[incoming.AssetID]
-		if !found {
-			if err := insertAsset(ctx, tx, hb.HouseID, incoming, receivedAt); err != nil {
+		if stored, ok := registered[incoming.AssetID]; ok {
+			if err := applyKnownAsset(ctx, tx, registeredSource, hb.HouseID, stored, incoming, receivedAt); err != nil {
 				return err
 			}
 			continue
 		}
-
-		switch compareAsset(stored.houseID, stored.asset, incoming, hb.HouseID) {
-		case assetConflict:
-			return fmt.Errorf("%w: asset %q is registered to house %q as %q, heartbeat from house %q says %q",
-				domain.ErrIntegrityConflict, incoming.AssetID, stored.houseID, stored.asset.AssetType,
-				hb.HouseID, incoming.AssetType)
-		case assetChanged:
-			if _, err := tx.Exec(ctx, updateAssetSQL, incoming.AssetID,
-				incoming.CapacityKwh, incoming.MaxChargeKw, incoming.MaxDischargeKw,
-				incoming.V2GCapable, receivedAt); err != nil {
-				return fmt.Errorf("update asset %q: %w", incoming.AssetID, err)
+		if stored, ok := discovered[incoming.AssetID]; ok {
+			if err := applyKnownAsset(ctx, tx, discoveredSource, hb.HouseID, stored, incoming, receivedAt); err != nil {
+				return err
 			}
-		case assetUnchanged:
-			// No write: nothing about the asset's capabilities changed.
+			continue
+		}
+		if err := observeNewAsset(ctx, tx, hb.HouseID, incoming, receivedAt); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func loadAssets(ctx context.Context, tx pgx.Tx, ids []string) (map[string]storedAsset, error) {
-	rows, err := tx.Query(ctx, selectAssetsForUpdateSQL, ids)
+func loadAssets(ctx context.Context, tx pgx.Tx, query string, ids []string) (map[string]storedAsset, error) {
+	rows, err := tx.Query(ctx, query, ids)
 	if err != nil {
 		return nil, fmt.Errorf("load assets: %w", err)
 	}
@@ -174,18 +223,58 @@ func loadAssets(ctx context.Context, tx pgx.Tx, ids []string) (map[string]stored
 	return existing, nil
 }
 
-func insertAsset(ctx context.Context, tx pgx.Tx, houseID string, a domain.FlexibleAsset, receivedAt time.Time) error {
-	if _, err := tx.Exec(ctx, insertAssetSQL, a.AssetID, houseID, string(a.AssetType),
-		a.CapacityKwh, a.MaxChargeKw, a.MaxDischargeKw, a.V2GCapable, receivedAt); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			// Another house registered this asset_id after we read.
-			return fmt.Errorf("%w: asset %q was registered concurrently by another house",
-				domain.ErrIntegrityConflict, a.AssetID)
+// applyKnownAsset validates a heartbeat entry against a row we already have
+// (registered or observed) and refreshes capability fields only when they
+// changed. Owner and type are never updated here.
+func applyKnownAsset(
+	ctx context.Context,
+	tx pgx.Tx,
+	src assetSource,
+	houseID string,
+	stored storedAsset,
+	incoming domain.FlexibleAsset,
+	receivedAt time.Time,
+) error {
+	switch compareAsset(stored.houseID, stored.asset, incoming, houseID) {
+	case assetConflict:
+		return fmt.Errorf("%w: asset %q is %s house %q as %q, heartbeat from house %q reports %q",
+			domain.ErrIntegrityConflict, incoming.AssetID, src.relation, stored.houseID,
+			stored.asset.AssetType, houseID, incoming.AssetType)
+	case assetChanged:
+		if _, err := tx.Exec(ctx, src.updateSQL, incoming.AssetID,
+			incoming.CapacityKwh, incoming.MaxChargeKw, incoming.MaxDischargeKw,
+			incoming.V2GCapable, receivedAt); err != nil {
+			return fmt.Errorf("update asset %q: %w", incoming.AssetID, err)
 		}
-		return fmt.Errorf("insert asset %q: %w", a.AssetID, err)
+	case assetUnchanged:
+		// No write: nothing about the asset's capabilities changed.
 	}
 	return nil
+}
+
+// observeNewAsset records an asset nobody has registered or observed yet.
+// It only ever writes discovered_assets.
+func observeNewAsset(ctx context.Context, tx pgx.Tx, houseID string, a domain.FlexibleAsset, receivedAt time.Time) error {
+	tag, err := tx.Exec(ctx, insertDiscoveredAssetSQL, a.AssetID, houseID, string(a.AssetType),
+		a.CapacityKwh, a.MaxChargeKw, a.MaxDischargeKw, a.V2GCapable, receivedAt)
+	if err != nil {
+		return fmt.Errorf("record discovered asset %q: %w", a.AssetID, err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	// Another transaction recorded this asset between our read and insert.
+	// Validate against what it wrote instead of failing.
+	existing, err := loadAssets(ctx, tx, selectDiscoveredAssetsSQL, []string{a.AssetID})
+	if err != nil {
+		return err
+	}
+	stored, ok := existing[a.AssetID]
+	if !ok {
+		return fmt.Errorf("discovered asset %q disappeared during heartbeat", a.AssetID)
+	}
+	return applyKnownAsset(ctx, tx, discoveredSource, houseID, stored, a, receivedAt)
 }
 
 type assetAction int
@@ -196,9 +285,9 @@ const (
 	assetConflict
 )
 
-// compareAsset decides what a heartbeat entry means for an already
-// registered asset. Owner and type are identity (conflict if different);
-// capacity, power limits and v2g capability are capabilities (changed).
+// compareAsset decides what a heartbeat entry means for an asset we already
+// know. Owner and type are identity (conflict if different); capacity, power
+// limits and v2g capability are capabilities (changed).
 func compareAsset(storedHouseID string, stored, incoming domain.FlexibleAsset, incomingHouseID string) assetAction {
 	if storedHouseID != incomingHouseID || stored.AssetType != incoming.AssetType {
 		return assetConflict

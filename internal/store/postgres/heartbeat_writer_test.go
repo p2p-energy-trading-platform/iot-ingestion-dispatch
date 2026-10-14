@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
@@ -74,6 +76,8 @@ func newHBFixture(t *testing.T) hbFixture {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		_, _ = store.pool.Exec(ctx,
+			`DELETE FROM iot_data.discovered_assets WHERE observed_house_id IN (SELECT house_id FROM iot_data.houses WHERE grid_id = $1)`, f.gridID)
+		_, _ = store.pool.Exec(ctx,
 			`DELETE FROM iot_data.flexible_assets WHERE house_id IN (SELECT house_id FROM iot_data.houses WHERE grid_id = $1)`, f.gridID)
 		_, _ = store.pool.Exec(ctx, `DELETE FROM iot_data.houses WHERE grid_id = $1`, f.gridID)
 		_, _ = store.pool.Exec(ctx, `DELETE FROM iot_data.grids WHERE grid_id = $1`, f.gridID)
@@ -101,6 +105,53 @@ func bessAsset(id string, capacity float64) domain.FlexibleAsset {
 		CapacityKwh: capacity, MaxChargeKw: 3.5, MaxDischargeKw: 3.5}
 }
 
+// registerAsset stands in for the authoritative registration flow, which is
+// not part of the heartbeat service. The house must already exist.
+func (f hbFixture) registerAsset(t *testing.T, houseID string, a domain.FlexibleAsset, seenAt time.Time) {
+	t.Helper()
+	if _, err := f.store.pool.Exec(context.Background(),
+		`INSERT INTO iot_data.flexible_assets
+		    (asset_id, house_id, asset_type, capacity_kwh, max_charge_kw, max_discharge_kw,
+		     v2g_capable, first_seen_at, last_seen_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+		a.AssetID, houseID, string(a.AssetType), a.CapacityKwh, a.MaxChargeKw, a.MaxDischargeKw,
+		a.V2GCapable, seenAt); err != nil {
+		t.Fatalf("register asset: %v", err)
+	}
+}
+
+type assetRecord struct {
+	house    string
+	capacity float64
+	lastSeen time.Time
+	found    bool
+}
+
+func (f hbFixture) assetRecord(t *testing.T, table, houseColumn, assetID string) assetRecord {
+	t.Helper()
+	q := fmt.Sprintf(`SELECT %s, capacity_kwh, last_seen_at FROM iot_data.%s WHERE asset_id = $1`, houseColumn, table)
+
+	var r assetRecord
+	err := f.store.pool.QueryRow(context.Background(), q, assetID).Scan(&r.house, &r.capacity, &r.lastSeen)
+	switch {
+	case err == nil:
+		r.found = true
+	case errors.Is(err, pgx.ErrNoRows):
+		// not found: r.found stays false
+	default:
+		t.Fatal(err)
+	}
+	return r
+}
+
+func (f hbFixture) discovered(t *testing.T, assetID string) assetRecord {
+	return f.assetRecord(t, "discovered_assets", "observed_house_id", assetID)
+}
+
+func (f hbFixture) registered(t *testing.T, assetID string) assetRecord {
+	return f.assetRecord(t, "flexible_assets", "house_id", assetID)
+}
+
 func (f hbFixture) houseLastHeartbeat(t *testing.T, houseID string) time.Time {
 	t.Helper()
 	var ts time.Time
@@ -109,16 +160,6 @@ func (f hbFixture) houseLastHeartbeat(t *testing.T, houseID string) time.Time {
 		t.Fatal(err)
 	}
 	return ts
-}
-
-func (f hbFixture) assetState(t *testing.T, assetID string) (capacity float64, lastSeen time.Time) {
-	t.Helper()
-	if err := f.store.pool.QueryRow(context.Background(),
-		`SELECT capacity_kwh, last_seen_at FROM iot_data.flexible_assets WHERE asset_id = $1`, assetID).
-		Scan(&capacity, &lastSeen); err != nil {
-		t.Fatal(err)
-	}
-	return capacity, lastSeen
 }
 
 func (f hbFixture) count(t *testing.T, query string, args ...any) int {
@@ -130,27 +171,32 @@ func (f hbFixture) count(t *testing.T, query string, args ...any) int {
 	return n
 }
 
-func TestApplyHeartbeatDiscoversHouseAndAssets(t *testing.T) {
+func TestApplyHeartbeatRecordsUnknownAssetAsDiscoveredNotRegistered(t *testing.T) {
 	f := newHBFixture(t)
-	hb := f.heartbeat(f.houseID, bessAsset(f.assetID("bat"), 10))
+	id := f.assetID("bat")
 	at := time.Now().UTC().Truncate(time.Microsecond)
 
-	if err := f.store.ApplyHeartbeat(context.Background(), hb, at); err != nil {
+	if err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID, bessAsset(id, 10)), at); err != nil {
 		t.Fatal(err)
 	}
 
 	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(at) {
 		t.Fatalf("house last_heartbeat_at = %v, want %v", got, at)
 	}
-	capacity, assetSeen := f.assetState(t, f.assetID("bat"))
-	if capacity != 10 || !assetSeen.Equal(at) {
-		t.Fatalf("asset = (%v, %v), want (10, %v)", capacity, assetSeen, at)
+
+	d := f.discovered(t, id)
+	if !d.found || d.house != f.houseID || d.capacity != 10 || !d.lastSeen.Equal(at) {
+		t.Fatalf("discovered = %+v, want observed under %s, capacity 10, seen at %v", d, f.houseID, at)
+	}
+	if r := f.registered(t, id); r.found {
+		t.Fatalf("a heartbeat created a registered asset: %+v", r)
 	}
 }
 
-func TestApplyHeartbeatReplayRefreshesLivenessButNotUnchangedAssets(t *testing.T) {
+func TestApplyHeartbeatReplayRefreshesLivenessButNotUnchangedDiscoveredAsset(t *testing.T) {
 	f := newHBFixture(t)
-	hb := f.heartbeat(f.houseID, bessAsset(f.assetID("bat"), 10))
+	id := f.assetID("bat")
+	hb := f.heartbeat(f.houseID, bessAsset(id, 10))
 	first := time.Now().UTC().Truncate(time.Microsecond)
 	second := first.Add(time.Minute)
 	ctx := context.Background()
@@ -165,8 +211,8 @@ func TestApplyHeartbeatReplayRefreshesLivenessButNotUnchangedAssets(t *testing.T
 	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(second) {
 		t.Fatalf("house last_heartbeat_at = %v, want %v", got, second)
 	}
-	if _, assetSeen := f.assetState(t, f.assetID("bat")); !assetSeen.Equal(first) {
-		t.Fatalf("unchanged asset was written: last_seen_at = %v, want %v", assetSeen, first)
+	if d := f.discovered(t, id); !d.lastSeen.Equal(first) {
+		t.Fatalf("unchanged observation was written: last_seen_at = %v, want %v", d.lastSeen, first)
 	}
 }
 
@@ -187,7 +233,7 @@ func TestApplyHeartbeatNeverMovesLivenessBackwards(t *testing.T) {
 	}
 }
 
-func TestApplyHeartbeatUpdatesChangedCapability(t *testing.T) {
+func TestApplyHeartbeatUpdatesChangedCapabilityOfDiscoveredAsset(t *testing.T) {
 	f := newHBFixture(t)
 	id := f.assetID("bat")
 	first := time.Now().UTC().Truncate(time.Microsecond)
@@ -201,9 +247,96 @@ func TestApplyHeartbeatUpdatesChangedCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	capacity, assetSeen := f.assetState(t, id)
-	if capacity != 15 || !assetSeen.Equal(second) {
-		t.Fatalf("asset = (%v, %v), want (15, %v)", capacity, assetSeen, second)
+	d := f.discovered(t, id)
+	if d.capacity != 15 || !d.lastSeen.Equal(second) {
+		t.Fatalf("discovered = %+v, want capacity 15 seen at %v", d, second)
+	}
+}
+
+func TestApplyHeartbeatUpdatesCapabilitiesOfRegisteredAssetOnly(t *testing.T) {
+	f := newHBFixture(t)
+	id := f.assetID("bat")
+	first := time.Now().UTC().Truncate(time.Microsecond)
+	second := first.Add(time.Minute)
+	third := first.Add(2 * time.Minute)
+	ctx := context.Background()
+
+	// The house has to exist before an asset can be registered to it.
+	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID), first); err != nil {
+		t.Fatal(err)
+	}
+	f.registerAsset(t, f.houseID, bessAsset(id, 10), first)
+
+	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(id, 15)), second); err != nil {
+		t.Fatal(err)
+	}
+	r := f.registered(t, id)
+	if r.house != f.houseID || r.capacity != 15 || !r.lastSeen.Equal(second) {
+		t.Fatalf("registered = %+v, want owner %s, capacity 15, seen at %v", r, f.houseID, second)
+	}
+
+	// An identical heartbeat changes nothing.
+	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(id, 15)), third); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.registered(t, id); !r.lastSeen.Equal(second) {
+		t.Fatalf("unchanged registered asset was written: last_seen_at = %v, want %v", r.lastSeen, second)
+	}
+
+	if d := f.discovered(t, id); d.found {
+		t.Fatalf("a registered asset was also recorded as discovered: %+v", d)
+	}
+}
+
+func TestApplyHeartbeatAssetRegisteredToOtherHouseRollsBack(t *testing.T) {
+	f := newHBFixture(t)
+	shared := f.assetID("bat")
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	ctx := context.Background()
+
+	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID), at); err != nil {
+		t.Fatal(err)
+	}
+	f.registerAsset(t, f.houseID, bessAsset(shared, 10), at)
+
+	otherHouse := f.gridID + "-house0002"
+	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(otherHouse, bessAsset(shared, 10)), at.Add(time.Minute))
+	if !errors.Is(err, domain.ErrIntegrityConflict) {
+		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
+	}
+
+	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, otherHouse); n != 0 {
+		t.Fatalf("second house persisted despite conflict (rows = %d), transaction did not roll back", n)
+	}
+	if d := f.discovered(t, shared); d.found {
+		t.Fatalf("conflicting asset was recorded as discovered: %+v", d)
+	}
+	if r := f.registered(t, shared); r.house != f.houseID {
+		t.Fatalf("asset owner = %q, want %q (ownership must not change)", r.house, f.houseID)
+	}
+}
+
+func TestApplyHeartbeatAssetDiscoveredUnderOtherHouseIsConflict(t *testing.T) {
+	f := newHBFixture(t)
+	shared := f.assetID("bat")
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	ctx := context.Background()
+
+	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(shared, 10)), at); err != nil {
+		t.Fatal(err)
+	}
+
+	otherHouse := f.gridID + "-house0002"
+	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(otherHouse, bessAsset(shared, 10)), at.Add(time.Minute))
+	if !errors.Is(err, domain.ErrIntegrityConflict) {
+		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
+	}
+
+	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, otherHouse); n != 0 {
+		t.Fatalf("second house persisted despite conflict (rows = %d), transaction did not roll back", n)
+	}
+	if d := f.discovered(t, shared); d.house != f.houseID {
+		t.Fatalf("observed house = %q, want %q (observation must not move)", d.house, f.houseID)
 	}
 }
 
@@ -221,35 +354,6 @@ func TestApplyHeartbeatHouseIdentityMismatchIsConflict(t *testing.T) {
 	err := f.store.ApplyHeartbeat(ctx, changed, at.Add(time.Minute))
 	if !errors.Is(err, domain.ErrIntegrityConflict) {
 		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
-	}
-}
-
-func TestApplyHeartbeatAssetOwnedByOtherHouseRollsBack(t *testing.T) {
-	f := newHBFixture(t)
-	at := time.Now().UTC()
-	ctx := context.Background()
-	shared := f.assetID("bat")
-
-	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(shared, 10)), at); err != nil {
-		t.Fatal(err)
-	}
-
-	otherHouse := f.gridID + "-house0002"
-	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(otherHouse, bessAsset(shared, 10)), at.Add(time.Minute))
-	if !errors.Is(err, domain.ErrIntegrityConflict) {
-		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
-	}
-
-	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, otherHouse); n != 0 {
-		t.Fatalf("second house persisted despite conflict (rows = %d), transaction did not roll back", n)
-	}
-	var owner string
-	if err := f.store.pool.QueryRow(ctx,
-		`SELECT house_id FROM iot_data.flexible_assets WHERE asset_id = $1`, shared).Scan(&owner); err != nil {
-		t.Fatal(err)
-	}
-	if owner != f.houseID {
-		t.Fatalf("asset owner = %q, want %q (ownership must not change)", owner, f.houseID)
 	}
 }
 
