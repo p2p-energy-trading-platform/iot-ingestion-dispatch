@@ -31,6 +31,8 @@ type Config struct {
 	// PartitionQueueDepth bounds pending batches per partition before the
 	// poll loop is back-pressured. Zero uses the default.
 	PartitionQueueDepth int
+
+	Retry RetryPolicy
 }
 
 func (c Config) withDefaults() Config {
@@ -40,6 +42,7 @@ func (c Config) withDefaults() Config {
 	if c.PartitionQueueDepth <= 0 {
 		c.PartitionQueueDepth = defaultPartitionQueueDepth
 	}
+	c.Retry = c.Retry.withDefaults()
 	return c
 }
 
@@ -49,6 +52,7 @@ func (c Config) withDefaults() Config {
 type Consumer struct {
 	client    *kgo.Client
 	router    *Router
+	recorder  FailureRecorder
 	logger    *slog.Logger
 	config    Config
 	committer offsetCommitter
@@ -88,9 +92,12 @@ func (cc clientCommitter) CommitRecords(ctx context.Context, rs ...*kgo.Record) 
 // NewConsumer takes the router at construction time because partition
 // callbacks can fire as soon as the client joins the group. Register all
 // handlers on the router before calling Run.
-func NewConsumer(config Config, router *Router, logger *slog.Logger) (*Consumer, error) {
+func NewConsumer(config Config, router *Router, recorder FailureRecorder, logger *slog.Logger) (*Consumer, error) {
 	if router == nil {
 		return nil, errors.New("create kafka consumer: router is required")
+	}
+	if recorder == nil {
+		return nil, errors.New("create kafka consumer: failure recorder is required")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -102,6 +109,7 @@ func NewConsumer(config Config, router *Router, logger *slog.Logger) (*Consumer,
 
 	consumer := &Consumer{
 		router:       router,
+		recorder:     recorder,
 		logger:       logger,
 		config:       config,
 		ready:        make(chan struct{}),
@@ -232,6 +240,8 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 			worker := newPartitionWorker(c.workerCtx, tp, workerDeps{
 				router:     c.router,
 				committer:  c.committer,
+				recorder:   c.recorder,
+				retry:      c.config.Retry,
 				logger:     c.logger,
 				slots:      c.slots,
 				onFatal:    c.fail,

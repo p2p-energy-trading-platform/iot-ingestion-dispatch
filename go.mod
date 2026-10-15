@@ -3,6 +3,7 @@ module github.com/p2p-energy-trading-platform/iot-ingestion-dispatch
 go 1.27
 
 require (
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/pressly/goose/v3 v3.27.3

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
 const workerTestTopic = "test.topic"
@@ -78,9 +80,30 @@ func (l *workerTestLog) snapshot() []int64 {
 	return slices.Clone(l.offsets)
 }
 
+type capturingRecorder struct {
+	mu      sync.Mutex
+	records []IngestionFailure
+	err     error
+}
+
+func (r *capturingRecorder) RecordFailure(_ context.Context, rec IngestionFailure) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, rec)
+	return r.err
+}
+
+func (r *capturingRecorder) snapshot() []IngestionFailure {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.records)
+}
+
 type workerTestEnv struct {
 	router    *Router
 	committer *workerTestCommitter
+	recorder  *capturingRecorder
+	retry     RetryPolicy
 	slots     chan struct{}
 	fatal     chan error
 }
@@ -93,8 +116,14 @@ func newWorkerTestEnv(slotCount int, h workerTestHandler) *workerTestEnv {
 	return &workerTestEnv{
 		router:    router,
 		committer: &workerTestCommitter{},
-		slots:     make(chan struct{}, slotCount),
-		fatal:     make(chan error, 8),
+		recorder:  &capturingRecorder{},
+		retry: RetryPolicy{
+			MaxTries:        1,
+			InitialInterval: time.Millisecond,
+			MaxInterval:     time.Millisecond,
+		},
+		slots: make(chan struct{}, slotCount),
+		fatal: make(chan error, 8),
 	}
 }
 
@@ -105,6 +134,8 @@ func (e *workerTestEnv) startWorker(t *testing.T, partition int32, queueDepth in
 		workerDeps{
 			router:    e.router,
 			committer: e.committer,
+			recorder:  e.recorder,
+			retry:     e.retry,
 			logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 			slots:     e.slots,
 			onFatal: func(err error) {
@@ -221,7 +252,66 @@ func TestWorkerPreservesOrderAcrossBatches(t *testing.T) {
 	assertOffsets(t, "committed", env.committer.offsets(), 0, 1, 2, 3, 4, 5)
 }
 
-func TestWorkerCommitsOnlyFinishedPrefixOnHandlerError(t *testing.T) {
+func TestWorkerRecordsPermanentFailureThenCommitsAndContinues(t *testing.T) {
+	permanent := domain.NewValidationError("payload", "invalid JSON")
+	var seen workerTestLog
+	env := newWorkerTestEnv(4, func(_ context.Context, o int64) error {
+		if o == 3 {
+			return permanent
+		}
+		seen.add(o)
+		return nil
+	})
+	env.retry.MaxTries = 3
+	w := env.startWorker(t, 0, 2)
+
+	if err := w.enqueue(context.Background(), workerTestRecords(0, 0, 6)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool { return len(env.committer.offsets()) == 6 }, "commit of 6 records including poison")
+
+	assertOffsets(t, "handled", seen.snapshot(), 0, 1, 2, 4, 5)
+	assertOffsets(t, "committed", env.committer.offsets(), 0, 1, 2, 3, 4, 5)
+	assertNoFatal(t, env)
+
+	got := env.recorder.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("recorded %d failures, want 1", len(got))
+	}
+	if got[0].Offset != 3 || got[0].Stage != StageDecode || got[0].Attempts != 1 {
+		t.Fatalf("recorded %+v, want offset 3 decode attempts 1", got[0])
+	}
+}
+
+func TestWorkerRetriesTransientFailureThenCommits(t *testing.T) {
+	var calls int
+	env := newWorkerTestEnv(4, func(_ context.Context, o int64) error {
+		if o == 0 {
+			calls++
+			if calls < 3 {
+				return errors.New("redis: timeout")
+			}
+		}
+		return nil
+	})
+	env.retry.MaxTries = 3
+	w := env.startWorker(t, 0, 1)
+
+	if err := w.enqueue(context.Background(), workerTestRecords(0, 0, 1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool { return len(env.committer.offsets()) == 1 }, "commit after retries")
+
+	if calls != 3 {
+		t.Fatalf("handler calls = %d, want 3", calls)
+	}
+	if n := len(env.recorder.snapshot()); n != 0 {
+		t.Fatalf("recorded %d failures, want 0 after success", n)
+	}
+	assertNoFatal(t, env)
+}
+
+func TestWorkerLeavesOffsetUncommittedWhenRecorderFails(t *testing.T) {
 	errBoom := errors.New("boom")
 	var seen workerTestLog
 	env := newWorkerTestEnv(4, func(_ context.Context, o int64) error {
@@ -231,6 +321,7 @@ func TestWorkerCommitsOnlyFinishedPrefixOnHandlerError(t *testing.T) {
 		seen.add(o)
 		return nil
 	})
+	env.recorder.err = errors.New("database unavailable")
 	w := env.startWorker(t, 0, 2)
 
 	if err := w.enqueue(context.Background(), workerTestRecords(0, 0, 6)); err != nil {
@@ -238,8 +329,8 @@ func TestWorkerCommitsOnlyFinishedPrefixOnHandlerError(t *testing.T) {
 	}
 
 	err := waitFatal(t, env)
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("fatal error = %v, want it to wrap errBoom", err)
+	if !errors.Is(err, env.recorder.err) {
+		t.Fatalf("fatal error = %v, want recorder error", err)
 	}
 	waitSignal(t, w.done)
 

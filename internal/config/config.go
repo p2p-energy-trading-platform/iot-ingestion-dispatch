@@ -16,6 +16,15 @@ type Config struct {
 	GRPC      GRPCConfig
 	Health    HealthConfig
 	Admission AdmissionConfig
+	Retry     RetryConfig
+}
+
+// RetryConfig is the bounded exponential-backoff budget applied to each
+// Kafka record. Permanent validation/provisioning errors skip it.
+type RetryConfig struct {
+	MaxTries        int
+	InitialInterval time.Duration
+	MaxInterval     time.Duration
 }
 
 type ServiceConfig struct {
@@ -98,6 +107,12 @@ func Load() (*Config, error) {
 
 		Admission: AdmissionConfig{
 			RefreshInterval: envDuration("ADMISSION_REFRESH_INTERVAL", 120*time.Second),
+		},
+
+		Retry: RetryConfig{
+			MaxTries:        envInt("INGESTION_RETRY_MAX_TRIES", 3),
+			InitialInterval: envDuration("INGESTION_RETRY_INITIAL_INTERVAL", 100*time.Millisecond),
+			MaxInterval:     envDuration("INGESTION_RETRY_MAX_INTERVAL", 2*time.Second),
 		},
 	}
 

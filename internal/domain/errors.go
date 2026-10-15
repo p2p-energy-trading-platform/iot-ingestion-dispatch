@@ -6,9 +6,9 @@ import (
 )
 
 // ErrValidation is the sentinel every ValidationError wraps. Callers
-// (e.g. retry.go, PETPG-226) can use errors.Is(err, domain.ErrValidation)
-// to classify a decode/validation failure as permanent - retrying a
-// malformed payload can never succeed.
+// can use errors.Is(err, domain.ErrValidation) to classify a
+// decode/validation failure as permanent - retrying a malformed payload
+// can never succeed.
 var ErrValidation = errors.New("domain: validation failed")
 
 // ValidationError names exactly which field failed and why, without
@@ -33,5 +33,10 @@ func NewValidationError(field, reason string) error {
 
 // ErrIntegrityConflict marks a record whose identity already exists in
 // durable history with different values. Retrying can never fix it and
-// history is never overwritten, so PETPG-226 should treat it as permanent.
+// history is never overwritten, so it is classified as permanent.
 var ErrIntegrityConflict = errors.New("domain: conflicting duplicate telemetry")
+
+// ErrGridNotProvisioned marks a record for a grid that the in-memory registry
+// accepted but the database does not have, for example during a registry
+// refresh window. Retrying cannot fix it, so it is classified as permanent.
+var ErrGridNotProvisioned = errors.New("domain: grid is not provisioned")

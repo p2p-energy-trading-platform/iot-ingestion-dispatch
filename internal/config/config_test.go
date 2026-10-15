@@ -21,6 +21,11 @@ func TestConfigValidate(t *testing.T) {
 				Postgres: PostgresConfig{
 					URL: "postgres://user:password@localhost:5432/test",
 				},
+				Retry: RetryConfig{
+					MaxTries:        3,
+					InitialInterval: 100,
+					MaxInterval:     200,
+				},
 			},
 			wantErr: false,
 		},
@@ -40,6 +45,23 @@ func TestConfigValidate(t *testing.T) {
 					Brokers: []string{
 						"localhost:9092",
 					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "retry max tries zero",
+			config: Config{
+				Kafka: KafkaConfig{
+					Brokers: []string{"localhost:9092"},
+				},
+				Postgres: PostgresConfig{
+					URL: "postgres://user:password@localhost:5432/test",
+				},
+				Retry: RetryConfig{
+					MaxTries:        0,
+					InitialInterval: 100,
+					MaxInterval:     200,
 				},
 			},
 			wantErr: true,
