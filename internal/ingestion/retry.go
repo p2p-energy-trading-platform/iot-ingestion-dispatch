@@ -21,12 +21,13 @@ const (
 )
 
 // Failure stages persisted on ingestion_failures.failure_stage. They must
-// match the CHECK constraint in migration 00007.
+// match the CHECK constraint (migrations 00007 and 00008).
 const (
 	StageDecode         = "decode"
 	StageGridValidation = "grid_validation"
 	StageRedisWrite     = "redis_write"
 	StageTimescaleWrite = "timescale_write"
+	StageHandlerPanic   = "handler_panic"
 )
 
 // RetryPolicy is the bounded exponential-backoff budget for a single Kafka
@@ -112,8 +113,9 @@ func retryHandle(ctx context.Context, policy RetryPolicy, logger *slog.Logger, o
 }
 
 // isPermanent reports errors that cannot succeed on retry: malformed
-// payloads, unprovisioned grids, immutable-history conflicts, and a missing
-// handler (a wiring bug, which the worker treats as fatal and never records).
+// payloads, unprovisioned grids, immutable-history conflicts, handler panics
+// (a deterministic bug), and a missing handler (a wiring bug, which the worker
+// treats as fatal and never records).
 func isPermanent(err error) bool {
 	switch {
 	case err == nil:
@@ -122,6 +124,7 @@ func isPermanent(err error) bool {
 		errors.Is(err, domain.ErrIntegrityConflict),
 		errors.Is(err, domain.ErrGridNotProvisioned),
 		errors.Is(err, admission.ErrUnknownGrid),
+		errors.Is(err, ErrHandlerPanic),
 		errors.Is(err, ErrNoHandler):
 		return true
 	default:
@@ -131,6 +134,8 @@ func isPermanent(err error) bool {
 
 func failureStage(err error) string {
 	switch {
+	case errors.Is(err, ErrHandlerPanic):
+		return StageHandlerPanic
 	case errors.Is(err, domain.ErrValidation):
 		return StageDecode
 	case errors.Is(err, admission.ErrUnknownGrid), errors.Is(err, domain.ErrGridNotProvisioned):

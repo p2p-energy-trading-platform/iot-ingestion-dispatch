@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -20,15 +22,26 @@ type offsetCommitter interface {
 
 var _ offsetCommitter = (*kgo.Client)(nil)
 
-// commitTimeout bounds each offset commit. Commits deliberately do NOT
-// use the worker's own context: during a graceful revoke or shutdown that
-// context may already be cancelled, yet the commit for work that did
-// finish must still go out.
-const commitTimeout = 10 * time.Second
+const (
+	// commitTimeout bounds each offset commit. Commits deliberately do NOT
+	// use the worker's own context: during a graceful revoke or shutdown that
+	// context may already be cancelled, yet the commit for work that did
+	// finish must still go out.
+	commitTimeout = 10 * time.Second
 
-// recordTimeout bounds each write to the failure store, so a hung database
-// cannot hold a partition worker forever.
-const recordTimeout = 10 * time.Second
+	// recordTimeout bounds each write to the failure store, so a hung database
+	// cannot hold a partition worker forever.
+	recordTimeout = 10 * time.Second
+
+	// defaultDrainTimeout is how long a revoked or stopping worker may take to
+	// finish the attempt it is running. It stays well below franz-go's default
+	// rebalance timeout (60s), because the revoke callback blocks the rebalance.
+	defaultDrainTimeout = 15 * time.Second
+)
+
+// abortGrace is how long stop waits, after cancelling a worker's context, for
+// the worker to exit before abandoning it. A variable so tests can shorten it.
+var abortGrace = 2 * time.Second
 
 var errWorkerStopped = errors.New("ingestion: partition worker stopped")
 
@@ -46,14 +59,15 @@ func (tp topicPartition) String() string {
 }
 
 type workerDeps struct {
-	router     *Router
-	committer  offsetCommitter
-	recorder   FailureRecorder
-	retry      RetryPolicy
-	logger     *slog.Logger
-	slots      chan struct{} // shared limiter: bounds concurrently running handlers
-	onFatal    func(error)   // reports an unrecoverable error to the consumer
-	queueDepth int           // bounded queue of pending batches for this partition
+	router       *Router
+	committer    offsetCommitter
+	recorder     FailureRecorder
+	retry        RetryPolicy
+	logger       *slog.Logger
+	slots        chan struct{} // shared limiter: bounds concurrently running handlers
+	onFatal      func(error)   // reports an unrecoverable error to the consumer
+	queueDepth   int           // bounded queue of pending batches for this partition
+	drainTimeout time.Duration // zero uses defaultDrainTimeout
 }
 
 // partitionWorker owns exactly one assigned topic-partition. Records for
@@ -72,6 +86,11 @@ type partitionWorker struct {
 	// while the attempt already running still finishes under ctx.
 	retryCtx    context.Context
 	retryCancel context.CancelFunc
+
+	// abandoned is set when stop gave up waiting for a stuck handler. An
+	// abandoned worker must never commit: the partition may already belong to
+	// someone else, and a late commit could move its offset backwards.
+	abandoned atomic.Bool
 
 	batches  chan []*kgo.Record
 	quit     chan struct{} // closed to request a graceful stop
@@ -101,6 +120,22 @@ func (w *partitionWorker) run() {
 	defer close(w.done)
 	defer w.cancel()
 	defer w.retryCancel()
+
+	// Last line of defence. Handler panics are contained per record in route;
+	// this catches anything else in the loop (the failure recorder, the
+	// committer, ...). An unrecovered panic in a goroutine would take down the
+	// whole process and every partition with it. The batch in progress stays
+	// uncommitted and is redelivered.
+	defer func() {
+		if r := recover(); r != nil {
+			w.deps.logger.Error("partition worker panic contained",
+				"partition", w.tp.String(),
+				"panic", panicText(r),
+				"stack", string(debug.Stack()),
+			)
+			w.deps.onFatal(fmt.Errorf("%w: partition %s: %s", ErrWorkerPanic, w.tp, panicText(r)))
+		}
+	}()
 
 	for {
 		// Prefer a pending stop over picking up more work.
@@ -178,13 +213,38 @@ func (w *partitionWorker) processBatch(recs []*kgo.Record) bool {
 	return true
 }
 
+// route runs the topic handler and contains any panic it raises. The panic is
+// logged with its stack, so it can be alerted on, and returned as a
+// HandlerPanicError, which is a permanent failure of this record only.
+func (w *partitionWorker) route(rec *kgo.Record) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			perr := &HandlerPanicError{
+				Topic:     rec.Topic,
+				Partition: rec.Partition,
+				Offset:    rec.Offset,
+				Value:     r,
+				Stack:     debug.Stack(),
+			}
+			w.deps.logger.Error("handler panic contained",
+				"partition", w.tp.String(),
+				"offset", rec.Offset,
+				"panic", panicText(r),
+				"stack", string(perr.Stack),
+			)
+			err = perr
+		}
+	}()
+	return w.deps.router.Route(w.ctx, rec.Topic, rec.Key, rec.Value)
+}
+
 // handleRecord runs the topic handler with bounded retry. It returns nil when
 // the record is finished: it succeeded, or it failed for good and the failure
 // was recorded. It returns errRecordInterrupted when a stop cut it short, or
 // another error when the record must stay uncommitted.
 func (w *partitionWorker) handleRecord(rec *kgo.Record) error {
 	attempts, err := retryHandle(w.retryCtx, w.deps.retry, w.deps.logger, func() error {
-		return w.deps.router.Route(w.ctx, rec.Topic, rec.Key, rec.Value)
+		return w.route(rec)
 	})
 	if err == nil {
 		return nil
@@ -228,6 +288,13 @@ func (w *partitionWorker) commit(recs []*kgo.Record) {
 	if len(recs) == 0 {
 		return
 	}
+	if w.abandoned.Load() {
+		w.deps.logger.Warn("abandoned partition worker skipped its offset commit",
+			"partition", w.tp.String(),
+			"through_offset", recs[len(recs)-1].Offset,
+		)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
@@ -245,30 +312,88 @@ func (w *partitionWorker) commit(recs []*kgo.Record) {
 
 // enqueue hands a batch to the worker. The queue is bounded, so a slow
 // partition applies backpressure to the poll loop instead of growing
-// memory without limit.
+// memory without limit. A stopped worker accepts nothing, even when its
+// queue has room.
 func (w *partitionWorker) enqueue(ctx context.Context, recs []*kgo.Record) error {
+	select {
+	case <-w.quit:
+		return errWorkerStopped
+	case <-w.done:
+		return errWorkerStopped
+	default:
+	}
+
 	select {
 	case w.batches <- recs:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-w.quit:
+		return errWorkerStopped
 	case <-w.done:
 		return errWorkerStopped
 	}
 }
 
-// stop asks the worker to finish and waits for it. Graceful (abort=false)
-// lets the attempt currently running complete and be committed, but cuts any
-// backoff wait short; abort=true cancels in-flight handlers first (used when
-// the partition was lost and commits would be rejected anyway). Safe to call
-// twice.
-func (w *partitionWorker) stop(abort bool) {
-	if abort {
-		w.cancel()
+// waitFor reports whether ch closed within d. A non-positive d only checks.
+func waitFor(ch <-chan struct{}, d time.Duration) bool {
+	if d <= 0 {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
 	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// stop asks the worker to finish and waits for it, within bounds, and reports
+// whether the worker exited.
+//
+//   - graceful (abort=false): the attempt currently running may finish and be
+//     committed, but backoff waits are cut short. If it takes longer than the
+//     drain timeout, its context is cancelled.
+//   - abort (abort=true): the context is cancelled at once, used when the
+//     partition was lost and commits would be rejected anyway.
+//
+// After the context is cancelled the worker gets abortGrace to exit. A handler
+// that ignores cancellation is then abandoned: stop returns false, and the
+// worker will never commit. Safe to call more than once.
+func (w *partitionWorker) stop(abort bool) bool {
 	w.stopOnce.Do(func() {
 		close(w.quit)
 		w.retryCancel()
 	})
-	<-w.done
+
+	if abort {
+		w.cancel()
+	} else {
+		drain := w.deps.drainTimeout
+		if drain <= 0 {
+			drain = defaultDrainTimeout
+		}
+		if waitFor(w.done, drain) {
+			return true
+		}
+		w.deps.logger.Warn("partition worker did not drain in time; cancelling in-flight work",
+			"partition", w.tp.String(), "drain_timeout", drain)
+		w.cancel()
+	}
+
+	if waitFor(w.done, abortGrace) {
+		return true
+	}
+
+	w.abandoned.Store(true)
+	w.deps.logger.Error("partition worker ignored cancellation; abandoning it (it will not commit)",
+		"partition", w.tp.String(), "grace", abortGrace)
+	return false
 }
