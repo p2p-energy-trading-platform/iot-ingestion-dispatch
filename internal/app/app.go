@@ -91,8 +91,14 @@ func New(
 			ConsumerGroup:  config.Kafka.ConsumerGroup,
 			MeterTopic:     config.Kafka.MeterTopic,
 			HeartbeatTopic: config.Kafka.HeartbeatTopic,
+			Retry: ingestion.RetryPolicy{
+				MaxTries:        config.Retry.MaxTries,
+				InitialInterval: config.Retry.InitialInterval,
+				MaxInterval:     config.Retry.MaxInterval,
+			},
 		},
 		router,
+		postgres,
 		logger,
 	)
 	if err != nil {

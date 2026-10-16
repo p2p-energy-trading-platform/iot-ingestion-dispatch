@@ -108,7 +108,7 @@ func applyHouse(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt 
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation {
-			return fmt.Errorf("grid %q is not provisioned in iot_data.grids: %w", hb.GridID, err)
+			return fmt.Errorf("%w: grid %q is not provisioned in iot_data.grids: %v", domain.ErrGridNotProvisioned, hb.GridID, err)
 		}
 		return fmt.Errorf("insert house %q: %w", hb.HouseID, err)
 	}

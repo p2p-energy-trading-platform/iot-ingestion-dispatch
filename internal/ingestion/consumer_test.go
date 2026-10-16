@@ -26,8 +26,9 @@ func newTestConsumer(t *testing.T, h workerTestHandler) (*Consumer, *workerTestC
 
 	c := &Consumer{
 		router:       router,
+		recorder:     &capturingRecorder{},
 		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config:       Config{}.withDefaults(),
+		config:       Config{Retry: RetryPolicy{MaxTries: 1, InitialInterval: time.Millisecond, MaxInterval: time.Millisecond}}.withDefaults(),
 		committer:    committer,
 		slots:        make(chan struct{}, 4),
 		workers:      make(map[topicPartition]*partitionWorker),
@@ -183,8 +184,15 @@ func TestConsumerLostAbortsInFlightHandler(t *testing.T) {
 	}
 }
 
-func TestConsumerWorkerFailureSetsFatalAndCancels(t *testing.T) {
+func TestConsumerNewRequiresRouter(t *testing.T) {
+	if _, err := NewConsumer(Config{}, nil, nil, nil); err == nil {
+		t.Fatal("expected error for nil router")
+	}
+}
+
+func TestConsumerRecordingFailureSetsFatalAndLeavesOffsetUncommitted(t *testing.T) {
 	errBoom := errors.New("boom")
+	errRecord := errors.New("failure table unavailable")
 
 	c, committer := newTestConsumer(t, func(_ context.Context, o int64) error {
 		if o == 1 {
@@ -192,6 +200,8 @@ func TestConsumerWorkerFailureSetsFatalAndCancels(t *testing.T) {
 		}
 		return nil
 	})
+	// Workers copy the recorder when a partition is assigned, so set it first.
+	c.recorder = &ffRecorder{err: errRecord}
 	c.onAssigned(context.Background(), nil, map[string][]int32{workerTestTopic: {0}})
 
 	if err := c.dispatch(context.Background(), testFetches(0, workerTestRecords(0, 0, 3))); err != nil {
@@ -200,19 +210,44 @@ func TestConsumerWorkerFailureSetsFatalAndCancels(t *testing.T) {
 
 	eventually(t, func() bool { return c.fatal() != nil }, "fatal error recorded")
 
+	if !errors.Is(c.fatal(), errRecord) {
+		t.Fatalf("fatal = %v, want it to wrap the recorder error", c.fatal())
+	}
 	if !errors.Is(c.fatal(), errBoom) {
-		t.Fatalf("fatal = %v, want it to wrap errBoom", c.fatal())
+		t.Fatalf("fatal = %v, want it to keep the original handler error", c.fatal())
 	}
-	if c.fatalCtx.Err() == nil {
-		t.Fatal("fatal context was not cancelled")
-	}
+	eventually(t, func() bool { return c.fatalCtx.Err() != nil }, "fatal context cancelled")
+
 	if got := committer.offsets(); !slices.Equal(got, []int64{0}) {
-		t.Fatalf("committed %v, want [0]", got)
+		t.Fatalf("committed %v, want only [0]", got)
 	}
 }
 
-func TestConsumerNewRequiresRouter(t *testing.T) {
-	if _, err := NewConsumer(Config{}, nil, nil); err == nil {
-		t.Fatal("expected error for nil router")
+func TestConsumerHandlerFailureIsRecordedAndNotFatal(t *testing.T) {
+	errBoom := errors.New("boom")
+	recorder := &ffRecorder{}
+
+	c, committer := newTestConsumer(t, func(_ context.Context, o int64) error {
+		if o == 1 {
+			return errBoom
+		}
+		return nil
+	})
+	c.recorder = recorder
+	c.onAssigned(context.Background(), nil, map[string][]int32{workerTestTopic: {0}})
+
+	if err := c.dispatch(context.Background(), testFetches(0, workerTestRecords(0, 0, 3))); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, func() bool { return len(committer.offsets()) == 3 }, "all three records committed")
+	assertOffsets(t, "committed", committer.offsets(), 0, 1, 2)
+
+	failures := recorder.recorded()
+	if len(failures) != 1 || failures[0].Offset != 1 || failures[0].Attempts != 1 {
+		t.Fatalf("recorded failures = %+v, want exactly one at offset 1 after 1 attempt", failures)
+	}
+	if c.fatal() != nil {
+		t.Fatalf("a recorded failure must not be fatal, got %v", c.fatal())
 	}
 }
