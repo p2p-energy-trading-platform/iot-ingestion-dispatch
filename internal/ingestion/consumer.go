@@ -287,7 +287,7 @@ func (c *Consumer) takeWorkers(filter map[string][]int32) []*partitionWorker {
 			if w, ok := c.workers[tp]; ok {
 				taken = append(taken, w)
 				delete(c.workers, tp)
-				c.logger.Info("partition released", "partition", tp.String(), "abort", false)
+				c.logger.Info("partition released", "partition", tp.String())
 			}
 		}
 	}

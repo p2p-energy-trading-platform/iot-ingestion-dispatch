@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/ingestion"
 )
@@ -20,6 +21,8 @@ DO UPDATE SET
     error_reason   = EXCLUDED.error_reason,
     attempt_count  = EXCLUDED.attempt_count,
     last_failed_at = now()`
+
+const maxReasonRunes = 2000
 
 var _ ingestion.FailureRecorder = (*Store)(nil)
 
@@ -45,7 +48,7 @@ func (store *Store) RecordFailure(ctx context.Context, rec ingestion.IngestionFa
 		rec.RawPayload,
 		rec.PayloadSHA256,
 		rec.Stage,
-		rec.Reason,
+		sanitizeText(rec.Reason),
 		rec.Attempts,
 	)
 	if err != nil {
@@ -53,4 +56,15 @@ func (store *Store) RecordFailure(ctx context.Context, rec ingestion.IngestionFa
 			rec.Topic, rec.Partition, rec.Offset, rec.Stage, err)
 	}
 	return nil
+}
+
+// sanitizeText makes s safe for a TEXT column: Postgres rejects NUL bytes and
+// invalid UTF-8, and a rejected failure record would stop the partition.
+func sanitizeText(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	s = strings.ReplaceAll(s, "\x00", "")
+	if r := []rune(s); len(r) > maxReasonRunes {
+		s = string(r[:maxReasonRunes]) + "…"
+	}
+	return s
 }
