@@ -369,6 +369,7 @@ func waitFor(ch <-chan struct{}, d time.Duration) bool {
 // worker will never commit. Safe to call more than once.
 func (w *partitionWorker) stop(abort bool) bool {
 	w.stopOnce.Do(func() {
+		w.deps.logger.Info("partition worker stopping", "partition", w.tp.String(), "abort", abort)
 		close(w.quit)
 		w.retryCancel()
 	})

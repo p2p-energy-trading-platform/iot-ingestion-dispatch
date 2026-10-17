@@ -82,7 +82,7 @@ func TestRecordFailureReplayUpdatesInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
-func TestApplyHeartbeatUnprovisionedGridIsNotProvisionedError(t *testing.T) {
+func TestApplyHeartbeatUnknownHouseIsHouseIdentityError(t *testing.T) {
 	store := integrationStore(t)
 
 	hb := domain.Heartbeat{
@@ -94,7 +94,7 @@ func TestApplyHeartbeatUnprovisionedGridIsNotProvisionedError(t *testing.T) {
 		DeviceClass:   domain.DeviceClassConsumer,
 	}
 	err := store.ApplyHeartbeat(context.Background(), hb, time.Now().UTC())
-	if !errors.Is(err, domain.ErrGridNotProvisioned) {
-		t.Fatalf("error = %v, want ErrGridNotProvisioned", err)
+	if !errors.Is(err, domain.ErrHouseIdentity) {
+		t.Fatalf("error = %v, want ErrHouseIdentity", err)
 	}
 }

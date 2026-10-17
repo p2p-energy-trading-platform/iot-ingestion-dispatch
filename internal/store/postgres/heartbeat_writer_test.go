@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,8 @@ type hbFixture struct {
 	houseID string
 }
 
+func hbStr(s string) *string { return &s }
+
 func newHBFixture(t *testing.T) hbFixture {
 	t.Helper()
 	store := integrationStore(t)
@@ -85,6 +88,19 @@ func newHBFixture(t *testing.T) hbFixture {
 	return f
 }
 
+// registerHouse stands in for the registration flow, which is not part of the
+// heartbeat service. A nil meterID leaves the meter unregistered.
+func (f hbFixture) registerHouse(t *testing.T, houseID string, meterID *string, lastHeartbeat time.Time, ratedSolarKw float64) {
+	t.Helper()
+	if _, err := f.store.pool.Exec(context.Background(),
+		`INSERT INTO iot_data.houses
+		    (house_id, grid_id, device_class, rated_solar_kw, meter_id, first_seen_at, last_heartbeat_at)
+		 VALUES ($1, $2, 'residential_prosumer', $3, $4, $5, $5)`,
+		houseID, f.gridID, ratedSolarKw, meterID, lastHeartbeat); err != nil {
+		t.Fatalf("register house: %v", err)
+	}
+}
+
 func (f hbFixture) heartbeat(houseID string, assets ...domain.FlexibleAsset) domain.Heartbeat {
 	return domain.Heartbeat{
 		SchemaVersion:  "1.0",
@@ -105,8 +121,8 @@ func bessAsset(id string, capacity float64) domain.FlexibleAsset {
 		CapacityKwh: capacity, MaxChargeKw: 3.5, MaxDischargeKw: 3.5}
 }
 
-// registerAsset stands in for the authoritative registration flow, which is
-// not part of the heartbeat service. The house must already exist.
+// registerAsset stands in for the authoritative asset registration flow. The
+// house must already be registered.
 func (f hbFixture) registerAsset(t *testing.T, houseID string, a domain.FlexibleAsset, seenAt time.Time) {
 	t.Helper()
 	if _, err := f.store.pool.Exec(context.Background(),
@@ -162,14 +178,24 @@ func (f hbFixture) houseLastHeartbeat(t *testing.T, houseID string) time.Time {
 	return ts
 }
 
-func (f hbFixture) houseMeterID(t *testing.T, houseID string) string {
+func (f hbFixture) houseMeterID(t *testing.T, houseID string) *string {
 	t.Helper()
-	var meterID string
+	var m *string
 	if err := f.store.pool.QueryRow(context.Background(),
-		`SELECT meter_id FROM iot_data.houses WHERE house_id = $1`, houseID).Scan(&meterID); err != nil {
+		`SELECT meter_id FROM iot_data.houses WHERE house_id = $1`, houseID).Scan(&m); err != nil {
 		t.Fatal(err)
 	}
-	return meterID
+	return m
+}
+
+func (f hbFixture) houseRatedSolarKw(t *testing.T, houseID string) float64 {
+	t.Helper()
+	var v float64
+	if err := f.store.pool.QueryRow(context.Background(),
+		`SELECT rated_solar_kw FROM iot_data.houses WHERE house_id = $1`, houseID).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
 }
 
 func (f hbFixture) count(t *testing.T, query string, args ...any) int {
@@ -181,20 +207,143 @@ func (f hbFixture) count(t *testing.T, query string, args ...any) int {
 	return n
 }
 
-func TestApplyHeartbeatRecordsUnknownAssetAsDiscoveredNotRegistered(t *testing.T) {
-	f := newHBFixture(t)
-	id := f.assetID("bat")
-	at := time.Now().UTC().Truncate(time.Microsecond)
+func assertIdentityError(t *testing.T, err error, wantText string) {
+	t.Helper()
+	if !errors.Is(err, domain.ErrHouseIdentity) {
+		t.Fatalf("error = %v, want ErrHouseIdentity", err)
+	}
+	if !strings.Contains(err.Error(), wantText) {
+		t.Fatalf("error %q should mention %q", err, wantText)
+	}
+}
 
-	if err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID, bessAsset(id, 10)), at); err != nil {
+// ---- house identity ----------------------------------------------------
+
+func TestApplyHeartbeatRefreshesLivenessOfRegisteredHouse(t *testing.T) {
+	f := newHBFixture(t)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), at.Add(-time.Hour), 7)
+
+	if err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID), at); err != nil {
 		t.Fatal(err)
 	}
 
 	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(at) {
-		t.Fatalf("house last_heartbeat_at = %v, want %v", got, at)
+		t.Fatalf("last_heartbeat_at = %v, want %v", got, at)
 	}
-	if got := f.houseMeterID(t, f.houseID); got != "meter-"+f.houseID {
-		t.Fatalf("house meter_id = %q, want %q", got, "meter-"+f.houseID)
+	if got := f.houseRatedSolarKw(t, f.houseID); got != 7 {
+		t.Fatalf("rated_solar_kw = %v, want 7: a heartbeat must not change registration data", got)
+	}
+	if got := f.houseMeterID(t, f.houseID); got == nil || *got != "meter-"+f.houseID {
+		t.Fatalf("meter_id = %v, want it unchanged", got)
+	}
+}
+
+func TestApplyHeartbeatNeverMovesLivenessBackwards(t *testing.T) {
+	f := newHBFixture(t)
+	later := time.Now().UTC().Truncate(time.Microsecond)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), later.Add(-2*time.Hour), 7)
+	hb := f.heartbeat(f.houseID)
+	ctx := context.Background()
+
+	if err := f.store.ApplyHeartbeat(ctx, hb, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.ApplyHeartbeat(ctx, hb, later.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(later) {
+		t.Fatalf("last_heartbeat_at = %v, want %v (must not regress)", got, later)
+	}
+}
+
+func TestApplyHeartbeatUnknownHouseIsRejectedAndWritesNothing(t *testing.T) {
+	f := newHBFixture(t)
+	id := f.assetID("bat")
+	at := time.Now().UTC().Truncate(time.Microsecond)
+
+	err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID, bessAsset(id, 10)), at)
+	assertIdentityError(t, err, "is not registered")
+
+	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, f.houseID); n != 0 {
+		t.Fatalf("a heartbeat created a house (rows = %d)", n)
+	}
+	if d := f.discovered(t, id); d.found {
+		t.Fatalf("an asset was recorded for an unknown house: %+v", d)
+	}
+	if r := f.registered(t, id); r.found {
+		t.Fatalf("an asset was registered for an unknown house: %+v", r)
+	}
+}
+
+func TestApplyHeartbeatWrongGridIsRejectedAndWritesNothing(t *testing.T) {
+	f := newHBFixture(t)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	old := at.Add(-time.Hour)
+	id := f.assetID("bat")
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), old, 7)
+
+	hb := f.heartbeat(f.houseID, bessAsset(id, 10))
+	hb.GridID = f.gridID + "x"
+
+	err := f.store.ApplyHeartbeat(context.Background(), hb, at)
+	assertIdentityError(t, err, "registered in grid")
+
+	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(old) {
+		t.Fatalf("last_heartbeat_at = %v, want %v (a rejected heartbeat must not refresh liveness)", got, old)
+	}
+	if d := f.discovered(t, id); d.found {
+		t.Fatalf("an asset was recorded by a rejected heartbeat: %+v", d)
+	}
+}
+
+func TestApplyHeartbeatWrongMeterIsRejectedAndWritesNothing(t *testing.T) {
+	f := newHBFixture(t)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	old := at.Add(-time.Hour)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), old, 7)
+
+	hb := f.heartbeat(f.houseID, bessAsset(f.assetID("bat"), 10))
+	hb.MeterID = "meter-someone-else"
+
+	err := f.store.ApplyHeartbeat(context.Background(), hb, at)
+	assertIdentityError(t, err, "registered with meter")
+
+	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(old) {
+		t.Fatalf("last_heartbeat_at = %v, want %v", got, old)
+	}
+	if got := f.houseMeterID(t, f.houseID); got == nil || *got != "meter-"+f.houseID {
+		t.Fatalf("meter_id = %v, want it unchanged", got)
+	}
+}
+
+func TestApplyHeartbeatHouseWithoutRegisteredMeterIsRejectedAndNotFilledIn(t *testing.T) {
+	f := newHBFixture(t)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	old := at.Add(-time.Hour)
+	f.registerHouse(t, f.houseID, nil, old, 7)
+
+	err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID), at)
+	assertIdentityError(t, err, "no registered meter")
+
+	if got := f.houseMeterID(t, f.houseID); got != nil {
+		t.Fatalf("meter_id was filled in with %q: a heartbeat must not set meter identity", *got)
+	}
+	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(old) {
+		t.Fatalf("last_heartbeat_at = %v, want %v", got, old)
+	}
+}
+
+// ---- asset discovery and registration ----------------------------------
+
+func TestApplyHeartbeatRecordsUnknownAssetAsDiscoveredNotRegistered(t *testing.T) {
+	f := newHBFixture(t)
+	id := f.assetID("bat")
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), at.Add(-time.Hour), 7)
+
+	if err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(f.houseID, bessAsset(id, 10)), at); err != nil {
+		t.Fatal(err)
 	}
 
 	d := f.discovered(t, id)
@@ -209,9 +358,10 @@ func TestApplyHeartbeatRecordsUnknownAssetAsDiscoveredNotRegistered(t *testing.T
 func TestApplyHeartbeatReplayRefreshesLivenessButNotUnchangedDiscoveredAsset(t *testing.T) {
 	f := newHBFixture(t)
 	id := f.assetID("bat")
-	hb := f.heartbeat(f.houseID, bessAsset(id, 10))
 	first := time.Now().UTC().Truncate(time.Microsecond)
 	second := first.Add(time.Minute)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), first.Add(-time.Hour), 7)
+	hb := f.heartbeat(f.houseID, bessAsset(id, 10))
 	ctx := context.Background()
 
 	if err := f.store.ApplyHeartbeat(ctx, hb, first); err != nil {
@@ -229,28 +379,12 @@ func TestApplyHeartbeatReplayRefreshesLivenessButNotUnchangedDiscoveredAsset(t *
 	}
 }
 
-func TestApplyHeartbeatNeverMovesLivenessBackwards(t *testing.T) {
-	f := newHBFixture(t)
-	hb := f.heartbeat(f.houseID)
-	later := time.Now().UTC().Truncate(time.Microsecond)
-	ctx := context.Background()
-
-	if err := f.store.ApplyHeartbeat(ctx, hb, later); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.ApplyHeartbeat(ctx, hb, later.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.houseLastHeartbeat(t, f.houseID); !got.Equal(later) {
-		t.Fatalf("last_heartbeat_at = %v, want %v (must not regress)", got, later)
-	}
-}
-
 func TestApplyHeartbeatUpdatesChangedCapabilityOfDiscoveredAsset(t *testing.T) {
 	f := newHBFixture(t)
 	id := f.assetID("bat")
 	first := time.Now().UTC().Truncate(time.Microsecond)
 	second := first.Add(time.Minute)
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), first.Add(-time.Hour), 7)
 	ctx := context.Background()
 
 	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(id, 10)), first); err != nil {
@@ -272,13 +406,9 @@ func TestApplyHeartbeatUpdatesCapabilitiesOfRegisteredAssetOnly(t *testing.T) {
 	first := time.Now().UTC().Truncate(time.Microsecond)
 	second := first.Add(time.Minute)
 	third := first.Add(2 * time.Minute)
-	ctx := context.Background()
-
-	// The house has to exist before an asset can be registered to it.
-	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID), first); err != nil {
-		t.Fatal(err)
-	}
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), first.Add(-time.Hour), 7)
 	f.registerAsset(t, f.houseID, bessAsset(id, 10), first)
+	ctx := context.Background()
 
 	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(id, 15)), second); err != nil {
 		t.Fatal(err)
@@ -305,21 +435,19 @@ func TestApplyHeartbeatAssetRegisteredToOtherHouseRollsBack(t *testing.T) {
 	f := newHBFixture(t)
 	shared := f.assetID("bat")
 	at := time.Now().UTC().Truncate(time.Microsecond)
-	ctx := context.Background()
-
-	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID), at); err != nil {
-		t.Fatal(err)
-	}
+	old := at.Add(-time.Hour)
+	other := f.gridID + "-house0002"
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), old, 7)
+	f.registerHouse(t, other, hbStr("meter-"+other), old, 7)
 	f.registerAsset(t, f.houseID, bessAsset(shared, 10), at)
 
-	otherHouse := f.gridID + "-house0002"
-	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(otherHouse, bessAsset(shared, 10)), at.Add(time.Minute))
+	err := f.store.ApplyHeartbeat(context.Background(), f.heartbeat(other, bessAsset(shared, 10)), at.Add(time.Minute))
 	if !errors.Is(err, domain.ErrIntegrityConflict) {
 		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
 	}
 
-	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, otherHouse); n != 0 {
-		t.Fatalf("second house persisted despite conflict (rows = %d), transaction did not roll back", n)
+	if got := f.houseLastHeartbeat(t, other); !got.Equal(old) {
+		t.Fatalf("other house liveness = %v, want %v: the transaction did not roll back", got, old)
 	}
 	if d := f.discovered(t, shared); d.found {
 		t.Fatalf("conflicting asset was recorded as discovered: %+v", d)
@@ -333,60 +461,25 @@ func TestApplyHeartbeatAssetDiscoveredUnderOtherHouseIsConflict(t *testing.T) {
 	f := newHBFixture(t)
 	shared := f.assetID("bat")
 	at := time.Now().UTC().Truncate(time.Microsecond)
+	old := at.Add(-time.Hour)
+	other := f.gridID + "-house0002"
+	f.registerHouse(t, f.houseID, hbStr("meter-"+f.houseID), old, 7)
+	f.registerHouse(t, other, hbStr("meter-"+other), old, 7)
 	ctx := context.Background()
 
 	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID, bessAsset(shared, 10)), at); err != nil {
 		t.Fatal(err)
 	}
 
-	otherHouse := f.gridID + "-house0002"
-	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(otherHouse, bessAsset(shared, 10)), at.Add(time.Minute))
+	err := f.store.ApplyHeartbeat(ctx, f.heartbeat(other, bessAsset(shared, 10)), at.Add(time.Minute))
 	if !errors.Is(err, domain.ErrIntegrityConflict) {
 		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
 	}
 
-	if n := f.count(t, `SELECT count(*) FROM iot_data.houses WHERE house_id = $1`, otherHouse); n != 0 {
-		t.Fatalf("second house persisted despite conflict (rows = %d), transaction did not roll back", n)
+	if got := f.houseLastHeartbeat(t, other); !got.Equal(old) {
+		t.Fatalf("other house liveness = %v, want %v: the transaction did not roll back", got, old)
 	}
 	if d := f.discovered(t, shared); d.house != f.houseID {
-		t.Fatalf("observed house = %q, want %q (observation must not move)", d.house, f.houseID)
-	}
-}
-
-func TestApplyHeartbeatHouseIdentityMismatchIsConflict(t *testing.T) {
-	f := newHBFixture(t)
-	at := time.Now().UTC()
-	ctx := context.Background()
-
-	if err := f.store.ApplyHeartbeat(ctx, f.heartbeat(f.houseID), at); err != nil {
-		t.Fatal(err)
-	}
-
-	changed := f.heartbeat(f.houseID)
-	changed.DeviceClass = domain.DeviceClassCommercial
-	err := f.store.ApplyHeartbeat(ctx, changed, at.Add(time.Minute))
-	if !errors.Is(err, domain.ErrIntegrityConflict) {
-		t.Fatalf("error = %v, want ErrIntegrityConflict", err)
-	}
-
-	changed = f.heartbeat(f.houseID)
-	changed.MeterID = "meter-other"
-	err = f.store.ApplyHeartbeat(ctx, changed, at.Add(2*time.Minute))
-	if !errors.Is(err, domain.ErrIntegrityConflict) {
-		t.Fatalf("meter ID mismatch error = %v, want ErrIntegrityConflict", err)
-	}
-}
-
-func TestApplyHeartbeatUnprovisionedGridFails(t *testing.T) {
-	f := newHBFixture(t)
-	hb := f.heartbeat("nogrid-house0001")
-	hb.GridID = "gridthatdoesnotexist"
-
-	err := f.store.ApplyHeartbeat(context.Background(), hb, time.Now().UTC())
-	if err == nil {
-		t.Fatal("expected an error for a grid missing from iot_data.grids")
-	}
-	if errors.Is(err, domain.ErrIntegrityConflict) {
-		t.Fatalf("missing grid should not be reported as an integrity conflict: %v", err)
+		t.Fatalf("observed house = %q, want %q (an observation must not move)", d.house, f.houseID)
 	}
 }
