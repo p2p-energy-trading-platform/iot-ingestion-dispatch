@@ -7,32 +7,27 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
-const pgForeignKeyViolation = "23503"
-
-// status is written once, on discovery. Liveness is derived from
-// last_heartbeat_at, never from status.
-const insertHouseSQL = `
-INSERT INTO iot_data.houses
-    (house_id, grid_id, device_class, rated_solar_kw, status, first_seen_at, last_heartbeat_at, meter_id)
-VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
-ON CONFLICT (house_id) DO NOTHING`
-
-const selectHouseForUpdateSQL = `
-SELECT grid_id, device_class, COALESCE(meter_id, '')
-FROM iot_data.houses
-WHERE house_id = $1
-FOR UPDATE`
-
-const updateHouseSQL = `
+// Houses are registered by a separate flow, never by heartbeats. A heartbeat
+// only proves that an already registered house is alive: the update matches
+// on the full identity (house, grid and meter) and changes nothing but the
+// liveness timestamp. GREATEST keeps a late or replayed heartbeat from moving
+// the timestamp backwards.
+const touchHouseSQL = `
 UPDATE iot_data.houses
-SET rated_solar_kw    = $2,
-    last_heartbeat_at = GREATEST(last_heartbeat_at, $3),
-    meter_id          = COALESCE(meter_id, $4)
+SET last_heartbeat_at = GREATEST(last_heartbeat_at, $4)
+WHERE house_id = $1
+  AND grid_id = $2
+  AND meter_id = $3
+RETURNING house_id`
+
+// Only used to explain why touchHouseSQL matched nothing.
+const selectHouseIdentitySQL = `
+SELECT grid_id, meter_id
+FROM iot_data.houses
 WHERE house_id = $1`
 
 // Authoritative registry. Heartbeats may read it and refresh capability
@@ -77,9 +72,14 @@ SET capacity_kwh     = $2,
 WHERE asset_id = $1`
 
 // ApplyHeartbeat runs the Postgres half of the heartbeat workflow in one
-// transaction: validate or discover the house and refresh its liveness, then
-// handle each reported asset without ever granting it anything.
+// transaction.
 //
+// House: the house must already be registered with this grid and meter. Its
+// liveness timestamp is refreshed; nothing else about it is ever written. An
+// unknown house, or one registered under another grid or meter, returns
+// domain.ErrHouseIdentity and writes nothing.
+//
+// Assets, each handled without ever granting anything:
 //   - registered asset: validated against its house; capability fields are
 //     updated only when they changed
 //   - previously observed asset: same rules, against the observation
@@ -88,9 +88,9 @@ WHERE asset_id = $1`
 //     dispatch or settlement eligibility, or user consent.
 //
 // An asset tied to a different house, or reported with a different type, is a
-// permanent identity conflict: domain.ErrIntegrityConflict, and the whole
-// transaction rolls back. Other errors are infrastructure failures and safe
-// to retry.
+// permanent identity conflict: domain.ErrIntegrityConflict. Any permanent
+// failure rolls the whole transaction back. Other errors are infrastructure
+// failures and safe to retry.
 func (store *Store) ApplyHeartbeat(ctx context.Context, hb domain.Heartbeat, receivedAt time.Time) error {
 	receivedAt = receivedAt.UTC().Truncate(time.Microsecond)
 
@@ -103,32 +103,43 @@ func (store *Store) ApplyHeartbeat(ctx context.Context, hb domain.Heartbeat, rec
 }
 
 func applyHouse(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, receivedAt time.Time) error {
-	tag, err := tx.Exec(ctx, insertHouseSQL,
-		hb.HouseID, hb.GridID, string(hb.DeviceClass), hb.RatedSolarKw, hb.Status, receivedAt, hb.MeterID)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation {
-			return fmt.Errorf("%w: grid %q is not provisioned in iot_data.grids: %v", domain.ErrGridNotProvisioned, hb.GridID, err)
-		}
-		return fmt.Errorf("insert house %q: %w", hb.HouseID, err)
+	var touched string
+	err := tx.QueryRow(ctx, touchHouseSQL, hb.HouseID, hb.GridID, hb.MeterID, receivedAt).Scan(&touched)
+	if err == nil {
+		return nil
 	}
-	if tag.RowsAffected() == 1 {
-		return nil // newly discovered; liveness already set by the insert
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("update liveness of house %q: %w", hb.HouseID, err)
 	}
+	return explainHouseMismatch(ctx, tx, hb)
+}
 
-	var gridID, deviceClass, meterID string
-	if err := tx.QueryRow(ctx, selectHouseForUpdateSQL, hb.HouseID).Scan(&gridID, &deviceClass, &meterID); err != nil {
-		return fmt.Errorf("load house %q: %w", hb.HouseID, err)
-	}
-	if gridID != hb.GridID || deviceClass != string(hb.DeviceClass) || (meterID != "" && meterID != hb.MeterID) {
-		return fmt.Errorf("%w: house %q is registered as grid %q class %q meter %q, heartbeat says grid %q class %q meter %q",
-			domain.ErrIntegrityConflict, hb.HouseID, gridID, deviceClass, meterID, hb.GridID, hb.DeviceClass, hb.MeterID)
-	}
+// explainHouseMismatch turns "the update matched no row" into a specific
+// permanent error. It never writes.
+func explainHouseMismatch(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat) error {
+	var gridID string
+	var meterID *string
+	err := tx.QueryRow(ctx, selectHouseIdentitySQL, hb.HouseID).Scan(&gridID, &meterID)
 
-	if _, err := tx.Exec(ctx, updateHouseSQL, hb.HouseID, hb.RatedSolarKw, receivedAt, hb.MeterID); err != nil {
-		return fmt.Errorf("update house %q: %w", hb.HouseID, err)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("%w: house %q is not registered", domain.ErrHouseIdentity, hb.HouseID)
+	case err != nil:
+		return fmt.Errorf("load identity of house %q: %w", hb.HouseID, err)
+	case gridID != hb.GridID:
+		return fmt.Errorf("%w: house %q is registered in grid %q, heartbeat says grid %q",
+			domain.ErrHouseIdentity, hb.HouseID, gridID, hb.GridID)
+	case meterID == nil:
+		return fmt.Errorf("%w: house %q has no registered meter, heartbeat says meter %q",
+			domain.ErrHouseIdentity, hb.HouseID, hb.MeterID)
+	case *meterID != hb.MeterID:
+		return fmt.Errorf("%w: house %q is registered with meter %q, heartbeat says meter %q",
+			domain.ErrHouseIdentity, hb.HouseID, *meterID, hb.MeterID)
+	default:
+		// The registration changed between our two statements. That is not a
+		// permanent failure, so it is deliberately not ErrHouseIdentity.
+		return fmt.Errorf("registration of house %q changed while its heartbeat was processed; retry", hb.HouseID)
 	}
-	return nil
 }
 
 type storedAsset struct {
