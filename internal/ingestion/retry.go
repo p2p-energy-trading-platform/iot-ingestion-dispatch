@@ -123,6 +123,7 @@ func isPermanent(err error) bool {
 	case errors.Is(err, domain.ErrValidation),
 		errors.Is(err, domain.ErrIntegrityConflict),
 		errors.Is(err, domain.ErrGridNotProvisioned),
+		errors.Is(err, domain.ErrHouseIdentity),
 		errors.Is(err, admission.ErrUnknownGrid),
 		errors.Is(err, ErrHandlerPanic),
 		errors.Is(err, ErrNoHandler):
@@ -138,7 +139,7 @@ func failureStage(err error) string {
 		return StageHandlerPanic
 	case errors.Is(err, domain.ErrValidation):
 		return StageDecode
-	case errors.Is(err, admission.ErrUnknownGrid), errors.Is(err, domain.ErrGridNotProvisioned):
+	case errors.Is(err, admission.ErrUnknownGrid), errors.Is(err, domain.ErrGridNotProvisioned), errors.Is(err, domain.ErrHouseIdentity):
 		return StageGridValidation
 	case errors.Is(err, domain.ErrIntegrityConflict):
 		return StageTimescaleWrite

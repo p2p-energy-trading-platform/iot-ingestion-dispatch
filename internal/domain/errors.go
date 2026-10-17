@@ -40,3 +40,9 @@ var ErrIntegrityConflict = errors.New("domain: conflicting duplicate telemetry")
 // accepted but the database does not have, for example during a registry
 // refresh window. Retrying cannot fix it, so it is classified as permanent.
 var ErrGridNotProvisioned = errors.New("domain: grid is not provisioned")
+
+// ErrHouseIdentity marks a heartbeat whose house is unknown, or whose grid or
+// meter does not match the registered house. Houses come from a separate
+// registration flow and a heartbeat never creates or moves one, so retrying
+// cannot fix it: it is a permanent identity/provisioning failure.
+var ErrHouseIdentity = errors.New("domain: house identity does not match registration")
