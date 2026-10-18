@@ -61,6 +61,18 @@ func (app *App) shutdown() error {
 		errs = append(errs, fmt.Errorf("close health server: %w", err))
 	}
 
+	if app.metricsHTTP != nil {
+		if err := app.metricsHTTP.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("close metrics server: %w", err))
+		}
+	}
+
+	if app.stopTracing != nil {
+		if err := app.stopTracing(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("flush tracing: %w", err))
+		}
+	}
+
 	app.logger.Info("Closing redis")
 	if err := app.redis.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("close redis: %w", err))

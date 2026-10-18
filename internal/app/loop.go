@@ -10,8 +10,8 @@ func (app *App) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// One slot per component goroutine: health, grpc, kafka consumer.
-	errorChannel := make(chan error, 3)
+	// One slot per component goroutine: health, metrics, grpc, kafka consumer.
+	errorChannel := make(chan error, 4)
 
 	// Step 2: ensure migrations are at the expected version before doing
 	// anything else. This service never applies migrations itself
@@ -31,6 +31,18 @@ func (app *App) Run(ctx context.Context) error {
 			errorChannel <- fmt.Errorf("health error: %w", err)
 		}
 	}()
+
+	if app.metricsHTTP != nil {
+		app.logger.Info("starting metrics server", "address", app.config.Metrics.Address)
+
+		go func() {
+			if err := app.metricsHTTP.Run(); err != nil {
+				errorChannel <- fmt.Errorf("metrics error: %w", err)
+			}
+		}()
+	}
+
+	go app.monitor(runCtx)
 
 	app.logger.Info("starting gRPC server", "address", app.config.GRPC.Address)
 
