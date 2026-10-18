@@ -90,7 +90,7 @@ func newTimescale(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS iot_data"); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 
