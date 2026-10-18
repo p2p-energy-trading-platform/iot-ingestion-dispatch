@@ -67,6 +67,7 @@ type workerDeps struct {
 	slots        chan struct{} // shared limiter: bounds concurrently running handlers
 	onFatal      func(error)   // reports an unrecoverable error to the consumer
 	queueDepth   int           // bounded queue of pending batches for this partition
+	metrics      Metrics       // nil is treated as NopMetrics
 	drainTimeout time.Duration // zero uses defaultDrainTimeout
 }
 
@@ -243,10 +244,18 @@ func (w *partitionWorker) route(rec *kgo.Record) (err error) {
 // was recorded. It returns errRecordInterrupted when a stop cut it short, or
 // another error when the record must stay uncommitted.
 func (w *partitionWorker) handleRecord(rec *kgo.Record) error {
+	started := time.Now()
+	m := w.metrics()
 	attempts, err := retryHandle(w.retryCtx, w.deps.retry, w.deps.logger, func() error {
 		return w.route(rec)
 	})
+	if attempts > 1 {
+		for i := 1; i < attempts; i++ {
+			m.ObserveRetry(rec.Topic)
+		}
+	}
 	if err == nil {
+		m.ObserveRecord(rec.Topic, "ok", time.Since(started))
 		return nil
 	}
 	if w.retryCtx.Err() != nil {
@@ -255,7 +264,19 @@ func (w *partitionWorker) handleRecord(rec *kgo.Record) error {
 	if errors.Is(err, ErrNoHandler) {
 		return err
 	}
+	result := "retry_exhausted"
+	if isPermanent(err) {
+		result = "permanent"
+	}
+	m.ObserveRecord(rec.Topic, result, time.Since(started))
 	return w.recordFailure(rec, err, attempts)
+}
+
+func (w *partitionWorker) metrics() Metrics {
+	if w.deps.metrics == nil {
+		return NopMetrics{}
+	}
+	return w.deps.metrics
 }
 
 // recordFailure persists a permanent or exhausted failure. The caller commits
@@ -274,6 +295,7 @@ func (w *partitionWorker) recordFailure(rec *kgo.Record, handlerErr error, attem
 		return fmt.Errorf("record failure at stage %s: %w; handler error: %w", failure.Stage, err, handlerErr)
 	}
 
+	w.metrics().ObserveFailureRecorded(rec.Topic, failure.Stage)
 	w.deps.logger.Warn("recorded ingestion failure; committing offset",
 		"partition", w.tp.String(),
 		"offset", rec.Offset,
@@ -299,7 +321,10 @@ func (w *partitionWorker) commit(recs []*kgo.Record) {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 
-	if err := w.deps.committer.CommitRecords(ctx, recs...); err != nil {
+	commitStarted := time.Now()
+	err := w.deps.committer.CommitRecords(ctx, recs...)
+	w.metrics().ObserveCommit(time.Since(commitStarted), err == nil)
+	if err != nil {
 		// Not fatal: a failed commit only means redelivery. Expected
 		// after a lost partition, where commits are rejected.
 		w.deps.logger.Warn("offset commit failed; records may be redelivered",

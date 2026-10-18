@@ -605,3 +605,19 @@ func isDigit(b byte) bool {
 func isAssetIDChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
+
+// ValidateHouseIdentity applies the wire-contract identity rules to a house
+// being provisioned (cmd/register-houses), so registered identities are
+// exactly the ones the decoders will later accept from telemetry.
+func ValidateHouseIdentity(gridID, houseID, meterID, deviceClass string) (domain.DeviceClass, error) {
+	if err := validateGridID(gridID); err != nil {
+		return "", err
+	}
+	if err := validateHouseID(houseID, gridID); err != nil {
+		return "", err
+	}
+	if err := validateMeterID(meterID, houseID); err != nil {
+		return "", err
+	}
+	return validateDeviceClass(deviceClass)
+}
