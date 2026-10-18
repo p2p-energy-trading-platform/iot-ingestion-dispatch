@@ -19,6 +19,13 @@ func (app *App) ensureMigrationsCurrent(context context.Context) error {
 		return fmt.Errorf("determine expected migration version: %w", err)
 	}
 
+	// POSTGRES_EXPECTED_MIGRATION lets a rollout pin the version the deployed
+	// schema must be at, which is how old and new replicas overlap during an
+	// expand/contract release. Unset means "what this binary embeds".
+	if pinned := app.config.Postgres.ExpectedMigration; pinned > 0 {
+		expected = pinned
+	}
+
 	current, err := app.postgres.CurrentMigrationVersion(context)
 	if err != nil {
 		return fmt.Errorf("read current migration version: %w", err)

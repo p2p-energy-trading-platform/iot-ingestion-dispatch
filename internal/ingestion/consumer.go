@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -33,6 +34,17 @@ type Config struct {
 	PartitionQueueDepth int
 
 	Retry RetryPolicy
+
+	// Metrics receives instrumentation events. Nil uses NopMetrics.
+	Metrics Metrics
+
+	// Optional broker security and session settings; zero values keep the
+	// franz-go defaults. ExtraOpts is appended last, for TLS and SASL.
+	SessionTimeout    time.Duration
+	HeartbeatInterval time.Duration
+	FetchMaxBytes     int32
+	MaxPartitionBytes int32
+	ExtraOpts         []kgo.Opt
 }
 
 func (c Config) withDefaults() Config {
@@ -43,6 +55,9 @@ func (c Config) withDefaults() Config {
 		c.PartitionQueueDepth = defaultPartitionQueueDepth
 	}
 	c.Retry = c.Retry.withDefaults()
+	if c.Metrics == nil {
+		c.Metrics = NopMetrics{}
+	}
 	return c
 }
 
@@ -123,7 +138,7 @@ func NewConsumer(config Config, router *Router, recorder FailureRecorder, logger
 
 	consumer.committer = clientCommitter{consumer: consumer}
 
-	client, err := kgo.NewClient(
+	opts := []kgo.Opt{
 		kgo.SeedBrokers(config.Brokers...),
 		kgo.ConsumerGroup(config.ConsumerGroup),
 		kgo.ConsumeTopics(config.MeterTopic, config.HeartbeatTopic),
@@ -135,7 +150,22 @@ func NewConsumer(config Config, router *Router, recorder FailureRecorder, logger
 		kgo.OnPartitionsAssigned(consumer.onAssigned),
 		kgo.OnPartitionsRevoked(consumer.onRevoked),
 		kgo.OnPartitionsLost(consumer.onLost),
-	)
+	}
+	if config.SessionTimeout > 0 {
+		opts = append(opts, kgo.SessionTimeout(config.SessionTimeout))
+	}
+	if config.HeartbeatInterval > 0 {
+		opts = append(opts, kgo.HeartbeatInterval(config.HeartbeatInterval))
+	}
+	if config.FetchMaxBytes > 0 {
+		opts = append(opts, kgo.FetchMaxBytes(config.FetchMaxBytes))
+	}
+	if config.MaxPartitionBytes > 0 {
+		opts = append(opts, kgo.FetchMaxPartitionBytes(config.MaxPartitionBytes))
+	}
+	opts = append(opts, config.ExtraOpts...)
+
+	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		workerCancel()
 		fatalCancel()
@@ -227,6 +257,7 @@ func (c *Consumer) workerFor(tp topicPartition) *partitionWorker {
 }
 
 func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[string][]int32) {
+	c.config.Metrics.ObserveRebalance("assigned")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -246,6 +277,7 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 				slots:      c.slots,
 				onFatal:    c.fail,
 				queueDepth: c.config.PartitionQueueDepth,
+				metrics:    c.config.Metrics,
 			})
 			c.workers[tp] = worker
 			worker.start()
@@ -258,11 +290,13 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 // onRevoked lets the record currently being handled finish and commits the
 // finished prefix; queued-but-unstarted batches are dropped (redelivered).
 func (c *Consumer) onRevoked(_ context.Context, _ *kgo.Client, revoked map[string][]int32) {
+	c.config.Metrics.ObserveRebalance("revoked")
 	c.stopWorkers(c.takeWorkers(revoked), false)
 }
 
 // onLost aborts in-flight handlers: commits would be rejected anyway.
 func (c *Consumer) onLost(_ context.Context, _ *kgo.Client, lost map[string][]int32) {
+	c.config.Metrics.ObserveRebalance("lost")
 	c.stopWorkers(c.takeWorkers(lost), true)
 }
 

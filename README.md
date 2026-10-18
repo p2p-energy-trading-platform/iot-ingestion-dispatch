@@ -7,92 +7,37 @@ The **IoT Ingestion & Dispatch** service is a Go service in the GridX platform r
 # Repository Structure
 
 ```text
-iot-ingestion/
+iot-ingestion-dispatch/
 ├── cmd/
-│   ├── iot-ingestion/
-│   │   └── main.go                   # parse config, build app, handle signals
-│   └── migrate/
-│       └── main.go                   # single-owner migration command/job
+│   ├── iot-ingestion/        # the service: parse config, build app, handle signals
+│   ├── migrate/              # single-owner migration command/job
+│   ├── redis-rebuild/        # rebuild the Redis projection from TimescaleDB
+│   ├── failure-replay/       # operator tool: list / replay / discard failed records
+│   └── register-houses/      # provision houses (until the METER_VERIFIED consumer exists)
 ├── internal/
-│   ├── app/
-│   │   ├── app.go                    # dependency wiring and lifecycle
-│   │   └── shutdown.go               # readiness off, drain, bounded stop
-│   ├── config/
-│   │   ├── config.go                 # typed runtime configuration
-│   │   └── validate.go               # fail-fast cross-field validation
-│   ├── domain/
-│   │   ├── telemetry.go              # internal domain types and invariants
-│   │   ├── heartbeat.go
-│   │   └── errors.go                 # typed domain/application errors
-│   ├── ingestion/
-│   │   ├── consumer.go               # poll loop, partition workers, commits
-│   │   ├── router.go                 # strict topic-to-handler routing
-│   │   ├── decoder.go                # private JSON wire structs to domain
-│   │   ├── meter_handler.go          # ordered meter workflow
-│   │   ├── heartbeat_handler.go      # ordered heartbeat workflow
-│   │   ├── retry.go                  # transient/permanent policy
-│   │   └── failure_recorder.go       # failure application port
-│   ├── admission/
-│   │   ├── registry.go               # immutable in-memory snapshot
-│   │   └── refresher.go              # bootstrap and atomic refresh
-│   ├── query/
-│   │   ├── service.go                # storage-neutral query use cases
-│   │   └── pagination.go             # opaque keyset-token logic
+│   ├── app/                  # wiring, lifecycle, shutdown, dependency monitor
+│   ├── config/               # typed env config; malformed values fail startup
+│   ├── domain/               # internal domain types and errors
+│   ├── ingestion/            # consumer, partition workers, router, decoder, handlers, retry
+│   ├── admission/            # in-memory grid registry snapshot + refresher
+│   ├── rebuild/              # bounded Redis rebuild logic
 │   ├── store/
-│   │   ├── postgres/
-│   │   │   ├── pool.go
-│   │   │   ├── telemetry_writer.go
-│   │   │   ├── heartbeat_writer.go
-│   │   │   ├── query_repository.go
-│   │   │   ├── grid_loader.go
-│   │   │   └── failures.go
-│   │   └── redis/
-│   │       ├── client.go
-│   │       ├── latest.go
-│   │       ├── heartbeat.go
-│   │       ├── keys.go
-│   │       └── scripts/
-│   │           ├── set_latest_if_newer.lua
-│   │           └── update_heartbeat.lua
+│   │   ├── postgres/         # telemetry, heartbeat, grids, failures, rebuild reads
+│   │   └── redis/            # latest/heartbeat adapters + Lua scripts
 │   ├── transport/
-│   │   ├── grpc/
-│   │   │   ├── server.go             # options, registration, lifecycle
-│   │   │   ├── telemetry_handler.go  # generated API to query service
-│   │   │   ├── mapper.go
-│   │   │   ├── errors.go             # typed errors to gRPC status
-│   │   │   └── interceptors.go
-│   │   └── httphealth/
-│   │       └── server.go             # /healthz, /readyz only
-│   └── observability/
-│       ├── logging.go
-│       ├── metrics.go
-│       └── tracing.go
-├── migrations/
-│   ├── embed.go                      # embed.FS exposed to migrate command
-│   └── 00001_initial_schema.sql
-├── test/
-│   ├── integration/                  # real Kafka/Redis/TimescaleDB
-│   ├── contract/                     # generated-client interoperability
-│   ├── endtoend/                     # simulator -> query API smoke path
-│   ├── load/                         # reproducible ingest/query scenarios
-│   ├── fixtures/
-│   └── helpers/
-├── docs/
-│   └── runbooks/
-│       ├── consumer-lag.md
-│       ├── dependency-outage.md
-│       ├── failure-replay.md
-│       └── redis-rebuild.md
+│   │   ├── grpc/             # server shell, health, interceptors (query API: see below)
+│   │   └── httphealth/       # /healthz, /readyz and the separate /metrics listener
+│   └── observability/        # slog setup, Prometheus metrics, OpenTelemetry tracing
+├── migrations/               # goose SQL migrations (embedded)
+├── test/integration/         # testcontainers: real TimescaleDB, Redis and Kafka
+├── docs/runbooks/            # consumer-lag, dependency-outage, failure-replay, redis-rebuild
 ├── .github/workflows/ci.yml
-├── .dockerignore
-├── .env.example                      # names and safe examples, no secrets
-├── .gitignore                        # must exclude .env and local credentials
-├── Dockerfile                        # pinned multi-stage, non-root runtime
-├── docker-compose.yaml               # local development only
-├── go.mod
-├── go.sum
-└── README.md
+├── .env.example
+├── Dockerfile                # pinned multi-stage, non-root runtime
+└── docker-compose.yml        # local development only
 ```
+
+**Not in this repository yet:** the gRPC *query* API (`internal/query`, the generated-protocol handlers and `query_repository.go`) described in `docs/plans/iot-ingestion-dispatch/08-grpc.md` is owned separately and is not implemented here. Today the gRPC listener serves only the standard health service. Contract and load tests that depend on it (tiers 3-5 of the testing strategy) are pending that work. Dispatch and cold storage are deliberately out of scope.
 
 ---
 
@@ -149,6 +94,69 @@ Or
 ```bash
 task up
 ```
+
+---
+
+# Configuration and Operations
+
+All settings are environment variables (a local `.env` is loaded for development; see `.env.example`). **A malformed value, an unknown enum, or a contradictory combination fails startup** instead of silently using a default. With `SERVICE_ENV=production` the service additionally refuses plaintext Kafka/Redis/PostgreSQL, `REDIS_TLS_INSECURE_SKIP_VERIFY`, an implicit `REDIS_ACK_POLICY`, and a Redis eviction policy that could drop liveness or latest-state keys.
+
+| Area | Settings |
+|---|---|
+| Kafka | `KAFKA_BROKER` (comma-separated), `KAFKA_CONSUMER_GROUP`, `KAFKA_METER_TOPIC`, `KAFKA_HEARTBEAT_TOPIC`, `KAFKA_TLS`, `KAFKA_SASL_MECHANISM/USER/PASSWORD`, `KAFKA_SESSION_TIMEOUT`, `KAFKA_HEARTBEAT_INTERVAL`, `KAFKA_FETCH_MAX_BYTES`, `KAFKA_MAX_PARTITION_FETCH_BYTES` |
+| Input limits | `INGESTION_MAX_RECORD_BYTES` (default 64 KiB), `INGESTION_ENFORCE_HOUSE_KEY`, `INGESTION_MAX_CONCURRENT_HANDLERS` |
+| Retry | `INGESTION_RETRY_MAX_TRIES`, `INGESTION_RETRY_INITIAL_INTERVAL`, `INGESTION_RETRY_MAX_INTERVAL` |
+| PostgreSQL | `POSTGRES_URL`, `POSTGRES_MAX_CONNS`, `POSTGRES_MIN_CONNS`, `POSTGRES_CONNECT_TIMEOUT`, `POSTGRES_STATEMENT_TIMEOUT`, `POSTGRES_MAX_CONN_LIFETIME`, `POSTGRES_EXPECTED_MIGRATION` |
+| Redis | `REDIS_ADDRESS`, `REDIS_USERNAME/PASSWORD/DB`, `REDIS_TLS`, `REDIS_DIAL/READ/WRITE_TIMEOUT`, `REDIS_POOL_SIZE`, `REDIS_MIN_IDLE_CONNS`, `REDIS_MAX_RETRIES`, `REDIS_ACK_POLICY` |
+| Registry / lifecycle | `ADMISSION_REFRESH_INTERVAL` (default 120s), `SHUTDOWN_TIMEOUT` |
+| Observability | `LOG_LEVEL`, `METRICS_ADDRESS` (Prometheus `/metrics`, default `:9090`), `OTEL_EXPORTER_OTLP_ENDPOINT` (tracing is off when empty) |
+
+Secrets are read at process start; rotating one needs a rolling restart (see `docs/runbooks/dependency-outage.md`).
+
+## Redis acknowledgement policy
+
+This resolves the plan's first release-blocking decision as a **per-deployment setting**, defaulting to the safe choice:
+
+- `required` (default): a record whose TimescaleDB write succeeded but whose Redis update failed stays uncommitted and is retried. Redis is always current when a record is acknowledged.
+- `async-repair`: the record is acknowledged after the durable write; `iot_ingestion_cache_degraded_total` counts the gap, and `redis-rebuild` (or the next reading for that house) repairs the projection. Production must set the policy explicitly.
+
+The owners still need to pick the production value; both are implemented and tested.
+
+## Operator commands
+
+```bash
+go run ./cmd/redis-rebuild -dry-run          # rebuild Redis from TimescaleDB (docs/runbooks/redis-rebuild.md)
+go run ./cmd/failure-replay list             # unresolved ingestion failures
+go run ./cmd/failure-replay replay -actor you -id 12
+go run ./cmd/failure-replay discard -actor you -id 13
+```
+
+The container image ships `/migrate`, `/redis-rebuild`, `/failure-replay` and `/register-houses` next to the service binary.
+
+## Houses must be registered first
+
+A heartbeat never creates a house: the house (with its `grid_id` and `meter_id`) must already exist in `iot_data.houses`. An unregistered house's heartbeat is recorded in `ingestion_failures` with stage `grid_validation` and can be replayed after the house is registered. Unknown assets reported by a heartbeat go to `iot_data.discovered_assets`; only the registration flow writes `flexible_assets`.
+
+The planned registration flow (a `METER_VERIFIED` event consumed from Kafka) is not specified far enough to build yet. Until it is, houses are provisioned with `register-houses`, like grids are provisioned by migration:
+
+```bash
+go run ./cmd/register-houses -file houses.json -dry-run     # validate only
+go run ./cmd/register-houses -file houses.json
+```
+
+The file is a JSON array, or one JSON object per line, with `house_id`, `grid_id`, `meter_id`, `device_class` and optional `rated_solar_kw`. Simulator heartbeats have exactly these fields, so for local development a capture works as input:
+
+```bash
+mosquitto_sub -h localhost -t 'gridx/+/+/heartbeat' -C 120 > heartbeats.jsonl
+go run ./cmd/register-houses -file heartbeats.jsonl
+go run ./cmd/failure-replay list            # then replay any quarantined heartbeats
+```
+
+It is idempotent and never changes an existing house: a different grid, meter or device class for a registered house, or a meter already bound to another house, is refused.
+
+## Metrics
+
+Prometheus metrics use a separate listener so `/metrics` is never exposed through the health port. Labels are limited to topic, result class and failure stage; never house, grid, meter, asset or Kafka-key values. Signals include records processed/failed/retried, processing and commit latency, rebalances, degraded-cache events, grid-registry size/refresh/last-success, unresolved failure count and age, dependency up/down, and PostgreSQL pool usage, alongside Go runtime and process metrics.
 
 ---
 
@@ -332,6 +340,24 @@ Run tests with the Go race detector:
 
 ```bash
 go test -race ./...
+```
+
+Store tests that need real PostgreSQL/Redis are skipped unless pointed at them (migrations applied first):
+
+```bash
+TEST_DATABASE_URL=postgres://... TEST_REDIS_ADDRESS=localhost:6379 go test ./internal/store/...
+```
+
+Integration tests start pinned TimescaleDB, Redis and Kafka containers with testcontainers-go (Docker required). They cover clean-install and previous-version migration upgrades, retention and compression policies, the heartbeat and meter workflows, replay safety, Redis rebuild, failure replay, and a real Kafka consumer including a restart in the same group:
+
+```bash
+go test -tags integration ./test/integration/...
+```
+
+The decoders are fuzzed:
+
+```bash
+go test -run '^$' -fuzz FuzzDecodeMeterReading -fuzztime 30s ./internal/ingestion
 ```
 
 ---

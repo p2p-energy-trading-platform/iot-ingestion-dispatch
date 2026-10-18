@@ -34,6 +34,11 @@ type MeterHandler struct {
 	writer    MeterWriter
 	latest    LatestWriter
 	logger    *slog.Logger
+
+	topic   string
+	limits  InputLimits
+	policy  CachePolicy
+	metrics Metrics
 }
 
 var _ RecordHandler = (*MeterHandler)(nil)
@@ -42,13 +47,31 @@ func NewMeterHandler(admission GridAdmitter, writer MeterWriter, latest LatestWr
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &MeterHandler{admission: admission, writer: writer, latest: latest, logger: logger}
+	return &MeterHandler{admission: admission, writer: writer, latest: latest, logger: logger, metrics: NopMetrics{}}
 }
 
-func (h *MeterHandler) HandleRecord(ctx context.Context, _, value []byte) error {
+// WithInputLimits sets the record size and key checks. topic labels metrics.
+func (h *MeterHandler) WithInputLimits(l InputLimits) *MeterHandler { h.limits = l; return h }
+
+// WithCachePolicy sets the acknowledgement policy for Redis failures.
+func (h *MeterHandler) WithCachePolicy(p CachePolicy, topic string, m Metrics) *MeterHandler {
+	h.policy, h.topic = p, topic
+	if m != nil {
+		h.metrics = m
+	}
+	return h
+}
+
+func (h *MeterHandler) HandleRecord(ctx context.Context, key, value []byte) error {
 	// 1. Decode and validate.
+	if err := h.limits.checkSize(value); err != nil {
+		return fmt.Errorf("decode meter reading: %w", err)
+	}
 	reading, err := DecodeMeterReading(value)
 	if err != nil {
+		return fmt.Errorf("decode meter reading: %w", err)
+	}
+	if err := h.limits.checkKey(key, reading.GridID, reading.HouseID); err != nil {
 		return fmt.Errorf("decode meter reading: %w", err)
 	}
 
@@ -70,7 +93,8 @@ func (h *MeterHandler) HandleRecord(ctx context.Context, _, value []byte) error 
 	// 7. Latest state, only if newer. Runs on replays as well, in case a
 	// previous attempt committed to Postgres but failed here.
 	if _, err := h.latest.SetLatestIfNewer(ctx, toMeterProjection(reading)); err != nil {
-		return fmt.Errorf("update latest state for %s: %w", reading.MeterID, err)
+		err = fmt.Errorf("update latest state for %s: %w", reading.MeterID, err)
+		return absorbCacheError(h.policy, h.metrics, h.logger, h.topic, err)
 	}
 
 	// 8. The caller commits the Kafka offset on nil.
@@ -78,26 +102,5 @@ func (h *MeterHandler) HandleRecord(ctx context.Context, _, value []byte) error 
 }
 
 func toMeterProjection(r domain.MeterReading) redisstore.MeterProjection {
-	p := redisstore.MeterProjection{
-		EventTimeUnixMs: r.EventTime.UnixMilli(),
-		Seq:             r.Seq,
-		GridID:          r.GridID,
-		HouseID:         r.HouseID,
-		MeterID:         r.MeterID,
-		DeviceClass:     string(r.DeviceClass),
-		SolarKw:         r.SolarKw,
-		ConsumptionKw:   r.ConsumptionKw,
-		NetKw:           r.NetKw,
-	}
-	for _, a := range r.StorageAssets {
-		p.StorageAssets = append(p.StorageAssets, redisstore.StorageAssetProjection{
-			AssetID:     a.AssetID,
-			AssetType:   string(a.AssetType),
-			SocPct:      a.SocPct,
-			PowerKw:     a.PowerKw,
-			CapacityKwh: a.CapacityKwh,
-			PluggedIn:   a.PluggedIn,
-		})
-	}
-	return p
+	return redisstore.ProjectionOf(r)
 }

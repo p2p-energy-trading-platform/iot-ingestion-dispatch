@@ -30,6 +30,11 @@ type HeartbeatHandler struct {
 	cache     HeartbeatCache
 	logger    *slog.Logger
 	now       func() time.Time
+
+	topic   string
+	limits  InputLimits
+	policy  CachePolicy
+	metrics Metrics
 }
 
 var _ RecordHandler = (*HeartbeatHandler)(nil)
@@ -44,17 +49,36 @@ func NewHeartbeatHandler(admission GridAdmitter, store HeartbeatStore, cache Hea
 		cache:     cache,
 		logger:    logger,
 		now:       time.Now,
+		metrics:   NopMetrics{},
 	}
 }
 
-func (h *HeartbeatHandler) HandleRecord(ctx context.Context, _, value []byte) error {
+// WithInputLimits sets the record size and key checks.
+func (h *HeartbeatHandler) WithInputLimits(l InputLimits) *HeartbeatHandler { h.limits = l; return h }
+
+// WithCachePolicy sets the acknowledgement policy for Redis failures.
+func (h *HeartbeatHandler) WithCachePolicy(p CachePolicy, topic string, m Metrics) *HeartbeatHandler {
+	h.policy, h.topic = p, topic
+	if m != nil {
+		h.metrics = m
+	}
+	return h
+}
+
+func (h *HeartbeatHandler) HandleRecord(ctx context.Context, key, value []byte) error {
 	// One receive timestamp, shared by Postgres liveness and Redis state.
 	// Microsecond precision matches what timestamptz can store.
 	receivedAt := h.now().UTC().Truncate(time.Microsecond)
 
 	// 1. Decode and validate.
+	if err := h.limits.checkSize(value); err != nil {
+		return fmt.Errorf("decode heartbeat: %w", err)
+	}
 	hb, err := DecodeHeartbeat(value)
 	if err != nil {
+		return fmt.Errorf("decode heartbeat: %w", err)
+	}
+	if err := h.limits.checkKey(key, hb.GridID, hb.HouseID); err != nil {
 		return fmt.Errorf("decode heartbeat: %w", err)
 	}
 
@@ -77,7 +101,8 @@ func (h *HeartbeatHandler) HandleRecord(ctx context.Context, _, value []byte) er
 	// 9. Atomic Redis heartbeat update, with the same receive timestamp.
 	status := redisstore.HouseStatus{Status: hb.Status, LastHeartbeatAt: receivedAt}
 	if err := h.cache.UpdateHeartbeat(ctx, hb.GridID, hb.HouseID, status); err != nil {
-		return fmt.Errorf("update heartbeat state for %s: %w", hb.HouseID, err)
+		err = fmt.Errorf("update heartbeat state for %s: %w", hb.HouseID, err)
+		return absorbCacheError(h.policy, h.metrics, h.logger, h.topic, err)
 	}
 
 	// 10. The caller commits the Kafka offset on nil.
