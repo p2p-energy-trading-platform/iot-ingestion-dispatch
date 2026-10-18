@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
 var ErrNotFound = errors.New("redis: not found")
@@ -68,4 +70,31 @@ func (store *Store) GetLatest(context context.Context, gridID, houseID string) (
 		return MeterProjection{}, fmt.Errorf("redis: decode latest projection for %s: %w", key, err)
 	}
 	return p, nil
+}
+
+// ProjectionOf maps a domain reading to its Redis projection. The projection
+// is a separate shape from both the wire JSON and the domain type.
+func ProjectionOf(r domain.MeterReading) MeterProjection {
+	p := MeterProjection{
+		EventTimeUnixMs: r.EventTime.UnixMilli(),
+		Seq:             r.Seq,
+		GridID:          r.GridID,
+		HouseID:         r.HouseID,
+		MeterID:         r.MeterID,
+		DeviceClass:     string(r.DeviceClass),
+		SolarKw:         r.SolarKw,
+		ConsumptionKw:   r.ConsumptionKw,
+		NetKw:           r.NetKw,
+	}
+	for _, a := range r.StorageAssets {
+		p.StorageAssets = append(p.StorageAssets, StorageAssetProjection{
+			AssetID:     a.AssetID,
+			AssetType:   string(a.AssetType),
+			SocPct:      a.SocPct,
+			PowerKw:     a.PowerKw,
+			CapacityKwh: a.CapacityKwh,
+			PluggedIn:   a.PluggedIn,
+		})
+	}
+	return p
 }
