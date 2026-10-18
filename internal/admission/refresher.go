@@ -11,8 +11,14 @@ type GridLoader interface {
 	LoadGrids(ctx context.Context) ([]Grid, error)
 }
 
+// RegistryMetrics receives refresh outcomes. Optional.
+type RegistryMetrics interface {
+	ObserveRegistryRefresh(ok bool, gridCount int, took time.Duration)
+}
+
 type RefresherConfig struct {
 	Interval time.Duration
+	Metrics  RegistryMetrics
 }
 
 func (c RefresherConfig) withDefaults() RefresherConfig {
@@ -41,20 +47,31 @@ func NewRefresher(registry *Registry, loader GridLoader, cfg RefresherConfig, lo
 	}
 }
 
+func (r *Refresher) observe(ok bool, gridCount int, started time.Time) {
+	if r.cfg.Metrics != nil {
+		r.cfg.Metrics.ObserveRegistryRefresh(ok, gridCount, time.Since(started))
+	}
+}
+
 func (r *Refresher) Bootstrap(ctx context.Context) error {
+	started := time.Now()
 	grids, err := r.loader.LoadGrids(ctx)
 	if err != nil {
+		r.observe(false, 0, started)
 		return fmt.Errorf("admission: initial grid load failed: %w", err)
 	}
 
 	byID, err := toGridMap(grids)
 	if err != nil {
+		r.observe(false, 0, started)
 		return fmt.Errorf("admission: initial grid data invalid: %w", err)
 	}
 
 	if err := r.registry.Publish(byID); err != nil {
+		r.observe(false, 0, started)
 		return fmt.Errorf("admission: initial grid snapshot rejected: %w", err)
 	}
+	r.observe(true, len(byID), started)
 
 	r.logger.Info("grid registry bootstrapped", slog.Int("grid_count", len(byID)))
 	return nil
@@ -79,6 +96,7 @@ func (r *Refresher) refreshOnce(ctx context.Context) {
 
 	grids, err := r.loader.LoadGrids(ctx)
 	if err != nil {
+		r.observe(false, 0, started)
 		r.logger.Error("grid registry refresh failed, keeping last known-good snapshot",
 			slog.String("error", err.Error()))
 		return
@@ -86,6 +104,7 @@ func (r *Refresher) refreshOnce(ctx context.Context) {
 
 	byID, err := toGridMap(grids)
 	if err != nil {
+		r.observe(false, 0, started)
 		r.logger.Error("grid registry refresh produced invalid data, keeping last known-good snapshot",
 			slog.String("error", err.Error()))
 		return
@@ -95,10 +114,12 @@ func (r *Refresher) refreshOnce(ctx context.Context) {
 	added, removed := diffGridIDs(before, byID)
 
 	if err := r.registry.Publish(byID); err != nil {
+		r.observe(false, 0, started)
 		r.logger.Error("grid registry refresh rejected, keeping last known-good snapshot",
 			slog.String("error", err.Error()))
 		return
 	}
+	r.observe(true, len(byID), started)
 
 	r.logger.Info("grid registry refreshed",
 		slog.Int("grid_count", len(byID)),
