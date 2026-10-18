@@ -179,17 +179,17 @@ func Load() (*Config, error) {
 			SASLMech:          strings.ToUpper(os.Getenv("KAFKA_SASL_MECHANISM")),
 			SessionTime:       r.duration("KAFKA_SESSION_TIMEOUT", 45*time.Second),
 			Heartbeat:         r.duration("KAFKA_HEARTBEAT_INTERVAL", 3*time.Second),
-			FetchMaxBytes:     int32(r.integer("KAFKA_FETCH_MAX_BYTES", 0)),
-			MaxPartitionBytes: int32(r.integer("KAFKA_MAX_PARTITION_FETCH_BYTES", 0)),
+			FetchMaxBytes:     r.int32("KAFKA_FETCH_MAX_BYTES", 0),
+			MaxPartitionBytes: r.int32("KAFKA_MAX_PARTITION_FETCH_BYTES", 0),
 		},
 		Postgres: PostgresConfig{
 			URL:               os.Getenv("POSTGRES_URL"),
-			MaxConns:          int32(r.integer("POSTGRES_MAX_CONNS", 10)),
-			MinConns:          int32(r.integer("POSTGRES_MIN_CONNS", 1)),
+			MaxConns:          r.int32("POSTGRES_MAX_CONNS", 10),
+			MinConns:          r.int32("POSTGRES_MIN_CONNS", 1),
 			ConnectTimeout:    r.duration("POSTGRES_CONNECT_TIMEOUT", 10*time.Second),
 			StatementTimeout:  r.duration("POSTGRES_STATEMENT_TIMEOUT", 15*time.Second),
 			MaxConnLifetime:   r.duration("POSTGRES_MAX_CONN_LIFETIME", time.Hour),
-			ExpectedMigration: int64(r.integer("POSTGRES_EXPECTED_MIGRATION", 0)),
+			ExpectedMigration: r.int64("POSTGRES_EXPECTED_MIGRATION", 0),
 		},
 
 		Redis: RedisConfig{
@@ -286,6 +286,34 @@ func (r *reader) integer(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s: %q is not an integer", key, value))
+		return fallback
+	}
+	return parsed
+}
+
+// int32 parses with a 32-bit limit, so an out-of-range value is a config
+// error instead of silently wrapping when narrowed.
+func (r *reader) int32(key string, fallback int32) int32 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s: %q is not a 32-bit integer", key, value))
+		return fallback
+	}
+	return int32(parsed)
+}
+
+func (r *reader) int64(key string, fallback int64) int64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		r.errs = append(r.errs, fmt.Errorf("%s: %q is not an integer", key, value))
 		return fallback

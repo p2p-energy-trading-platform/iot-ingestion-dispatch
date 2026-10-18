@@ -106,6 +106,9 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		{"INGESTION_MAX_RECORD_BYTES", "1MB"},
 		{"KAFKA_TLS", "maybe"},
 		{"SHUTDOWN_TIMEOUT", "-"},
+		{"POSTGRES_MAX_CONNS", "4294967296"},
+		{"KAFKA_FETCH_MAX_BYTES", "99999999999"},
+		{"POSTGRES_EXPECTED_MIGRATION", "v9"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
