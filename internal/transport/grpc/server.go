@@ -38,10 +38,15 @@ func New(address string, logger *slog.Logger) *Server {
 		grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	)
 
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	return &Server{
 		address: address,
 		server:  server,
 		health:  healthServer,
+		logger:  logger,
 	}
 }
 
