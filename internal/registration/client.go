@@ -1,7 +1,7 @@
 
 package registration
 
-import (
+import(
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,75 +11,45 @@ import (
 	"time"
 )
 
-// ClaimPayload represents the request sent to the DEWA Mock API.
-type ClaimPayload struct {
+type LinkRequest struct {
 	RegistrationID string `json:"registrationId"`
 	MeterID        string `json:"meterId"`
 	UserReference  string `json:"userReference"`
 }
 
-// ClaimResponse represents the response received from the DEWA Mock API.
-type ClaimResponse struct {
-	Status  string `json:"status"`
+type LinkResponse struct {
+	Status string `json:"status"`
 	Message string `json:"message"`
 }
 
-// DEWAClient sends HTTP requests to the DEWA Mock API.
-type DEWAClient struct {
-	baseURL    string
+type Client struct {
+	baseURL string
 	httpClient *http.Client
 }
 
-// NewDEWAClient creates a DEWA client with a 10-second timeout.
-func NewDEWAClient(baseURL string) *DEWAClient {
-	return &DEWAClient{
+
+func NewClient(baseURL string) *Client {
+
+	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+	
 }
 
-// CreateLinkRequest sends a smart meter link request to DEWA.
-func (client *DEWAClient) CreateLinkRequest(
+
+func(c *Client) CreateLinkRequest (
 	ctx context.Context,
-	payload ClaimPayload,
-) (*ClaimResponse, error) {
-	body, err := json.Marshal(payload)
+	request LinkRequest,
+)(*LinkResponse, error){
+
+	payload, err := json.Marshal(request)
+	
 	if err != nil {
-		return nil, fmt.Errorf("marshal DEWA claim payload: %w", err)
+		return nil, fmt.Errorf("marshal DEWA link request: %w", err)
 	}
 
-	requestURL := client.baseURL + "/api/link-requests"
-
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		requestURL,
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create DEWA request: %w", err)
-	}
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("send DEWA link request: %w", err)
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode < http.StatusOK ||
-		response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("DEWA returned HTTP status %d", response.StatusCode)
-	}
-
-	var result ClaimResponse
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode DEWA response: %w", err)
-	}
-
-	return &result, nil
 }
+
