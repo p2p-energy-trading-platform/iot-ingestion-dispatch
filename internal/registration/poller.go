@@ -32,7 +32,7 @@ func NewPoller(client *Client) *Poller {
 }
 
 // PollLinkRequest checks DEWA until the request is approved,
-// rejected, cancelled by the caller, or times out.
+// rejected, cancelled, or times out.
 func (p *Poller) PollLinkRequest(
 	ctx context.Context,
 	requestID string,
@@ -45,43 +45,60 @@ func (p *Poller) PollLinkRequest(
 		return nil, fmt.Errorf("request ID is required")
 	}
 
-	if p.interval <= 0 {
-		return nil, fmt.Errorf("poll interval must be positive")
+	if p.client.httpClient == nil {
+		return nil, fmt.Errorf("DEWA HTTP client is not configured")
+	}
+
+	if p.interval < 3*time.Second ||
+		p.interval > 5*time.Second {
+		return nil, fmt.Errorf(
+			"poll interval must be between 3 and 5 seconds",
+		)
 	}
 
 	if p.timeout <= 0 {
 		return nil, fmt.Errorf("poll timeout must be positive")
 	}
 
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required")
+	}
+
 	pollCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	endpoint := p.client.baseURL +
+	endpoint := strings.TrimRight(p.client.baseURL, "/") +
 		"/api/link-requests/" + url.PathEscape(requestID)
 
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 
 	for {
+		if err := pollCtx.Err(); err != nil {
+			return nil, p.pollingError(err)
+		}
+
 		response, err := p.getStatus(pollCtx, endpoint)
 		if err != nil {
 			if pollCtx.Err() != nil {
-				return nil, fmt.Errorf(
-					"DEWA registration polling stopped: %w",
-					pollCtx.Err(),
-				)
+				return nil, p.pollingError(pollCtx.Err())
 			}
 
 			return nil, err
 		}
 
 		switch strings.ToUpper(strings.TrimSpace(response.Status)) {
-		case "APPROVED", "REJECTED":
+		case "APPROVED":
+			response.Status = "APPROVED"
+			return response, nil
+
+		case "REJECTED":
+			response.Status = "REJECTED"
 			return response, nil
 
 		case "PENDING", "PROCESSING":
-			// The registration is not finished.
-			// Wait before checking again.
+			// Registration is still in progress.
+			// Wait before checking DEWA again.
 
 		default:
 			return nil, fmt.Errorf(
@@ -92,15 +109,25 @@ func (p *Poller) PollLinkRequest(
 
 		select {
 		case <-pollCtx.Done():
-			return nil, fmt.Errorf(
-				"DEWA registration polling stopped: %w",
-				pollCtx.Err(),
-			)
+			return nil, p.pollingError(pollCtx.Err())
 
 		case <-ticker.C:
-			// Time to check the status again.
+			// Check the registration status again.
 		}
 	}
+}
+
+// pollingError describes why polling stopped.
+func (p *Poller) pollingError(err error) error {
+	if err == context.DeadlineExceeded {
+		return fmt.Errorf(
+			"DEWA registration polling timed out after %s: %w",
+			p.timeout,
+			err,
+		)
+	}
+
+	return fmt.Errorf("DEWA registration polling stopped: %w", err)
 }
 
 // getStatus sends a GET request to the DEWA status endpoint.
@@ -115,14 +142,20 @@ func (p *Poller) getStatus(
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create DEWA status request: %w", err)
+		return nil, fmt.Errorf(
+			"create DEWA status request: %w",
+			err,
+		)
 	}
 
 	request.Header.Set("Accept", "application/json")
 
 	resp, err := p.client.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("get DEWA registration status: %w", err)
+		return nil, fmt.Errorf(
+			"get DEWA registration status: %w",
+			err,
+		)
 	}
 	defer resp.Body.Close()
 
@@ -135,8 +168,18 @@ func (p *Poller) getStatus(
 	}
 
 	var response LinkResponse
+
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("decode DEWA status response: %w", err)
+		return nil, fmt.Errorf(
+			"decode DEWA status response: %w",
+			err,
+		)
+	}
+
+	if strings.TrimSpace(response.Status) == "" {
+		return nil, fmt.Errorf(
+			"DEWA status response contains an empty status",
+		)
 	}
 
 	return &response, nil
