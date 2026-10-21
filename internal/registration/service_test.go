@@ -1,222 +1,140 @@
-
 package registration
 
 import (
 	"context"
-	"fmt"
-	"strings"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
-
-	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
 )
 
-type testRegistrationRepository struct{}
+func TestRegisterHouseSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
 
-func (r *testRegistrationRepository) SaveMeterRegistration(
-	ctx context.Context,
-	registration postgres.MeterRegistration,
-) error {
-	return nil
-}
+			if r.URL.Path != "/api/link-requests" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
 
-type capturingRegistrationRepository struct {
-	savedRegistration postgres.MeterRegistration
-	called            bool
-}
+			var request LinkRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("failed to decode request: %v", err)
+				return
+			}
 
-func (r *capturingRegistrationRepository) SaveMeterRegistration(
-	ctx context.Context,
-	registration postgres.MeterRegistration,
-) error {
-	r.savedRegistration = registration
-	r.called = true
-	return nil
-}
+			if request.RegistrationID != "reg-123" {
+				t.Errorf("unexpected registration ID: %s", request.RegistrationID)
+			}
 
-type testDEWAClient struct{}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
 
-func (c *testDEWAClient) CreateLinkRequest(
-	ctx context.Context,
-	payload ClaimPayload,
-) (*ClaimResponse, error) {
-	return &ClaimResponse{
-		Status:  "PENDING",
-		Message: "Link request created",
-	}, nil
-}
+			_, _ = w.Write([]byte(
+				`{"status":"PENDING","message":"Link request created"}`,
+			))
+		},
+	))
+	defer server.Close()
 
-type failingDEWAClient struct{}
+	client := NewClient(server.URL)
+	service := NewService(client)
 
-func (c *failingDEWAClient) CreateLinkRequest(
-	ctx context.Context,
-	payload ClaimPayload,
-) (*ClaimResponse, error) {
-	return nil, fmt.Errorf("DEWA service unavailable")
-}
-
-func TestInitiateMeterClaimMissingMeterID(t *testing.T) {
-	service := NewService(&testRegistrationRepository{}, &testDEWAClient{})
-
-	_, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		UserReference: "USER-123",
-	})
-
-	if err == nil || !strings.Contains(err.Error(), "meter ID is required") {
-		t.Fatalf("expected meter ID validation error, got: %v", err)
+	request := LinkRequest{
+		RegistrationID: "reg-123",
+		MeterID:        "meter-001",
+		UserReference:  "user-001",
 	}
-}
 
-func TestInitiateMeterClaimMissingUserReference(t *testing.T) {
-	service := NewService(&testRegistrationRepository{}, &testDEWAClient{})
-
-	_, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		MeterID: "METER-001",
-	})
-
-	if err == nil || !strings.Contains(err.Error(), "user reference is required") {
-		t.Fatalf("expected user reference validation error, got: %v", err)
-	}
-}
-
-func TestInitiateMeterClaimGeneratesRegistrationID(t *testing.T) {
-	service := NewService(&testRegistrationRepository{}, &testDEWAClient{})
-
-	result, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		MeterID:       "METER-001",
-		UserReference: "USER-123",
-	})
+	response, err := service.RegisterHouse(context.Background(), request)
 	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+		t.Fatalf("RegisterHouse returned an error: %v", err)
 	}
 
-	if result.RegistrationID == "" {
-		t.Fatal("expected a generated registration ID")
+	if response.Status != "PENDING" {
+		t.Errorf("expected status PENDING, got %s", response.Status)
 	}
 
-	if result.Status != "PENDING" {
-		t.Errorf("expected status PENDING, got %q", result.Status)
-	}
-}
-
-func TestInitiateMeterClaimUsesProvidedRegistrationID(t *testing.T) {
-	service := NewService(&testRegistrationRepository{}, &testDEWAClient{})
-
-	const expectedID = "REG-123"
-
-	result, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		RegistrationID: expectedID,
-		MeterID:        "METER-001",
-		UserReference:  "USER-123",
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-
-	if result.RegistrationID != expectedID {
-		t.Errorf("expected registration ID %q, got %q", expectedID, result.RegistrationID)
+	if response.Message != "Link request created" {
+		t.Errorf("unexpected message: %s", response.Message)
 	}
 }
 
-func TestInitiateMeterClaimPersistsPendingStatus(t *testing.T) {
-	repository := &capturingRegistrationRepository{}
-	service := NewService(repository, &testDEWAClient{})
+func TestRegisterHouseMissingRegistrationID(t *testing.T) {
+	service := NewService(NewClient("http://localhost"))
 
-	_, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		RegistrationID: "REG-123",
-		MeterID:        "METER-001",
-		UserReference:  "USER-123",
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+	request := LinkRequest{
+		MeterID:       "meter-001",
+		UserReference: "user-001",
 	}
 
-	if !repository.called {
-		t.Fatal("expected registration to be persisted")
-	}
-
-	if repository.savedRegistration.ApprovalStatus != ApprovalPending {
-		t.Errorf("expected status %q, got %q",
-			ApprovalPending, repository.savedRegistration.ApprovalStatus)
-	}
-
-	if repository.savedRegistration.RegistrationID != "REG-123" {
-		t.Errorf("expected registration ID REG-123, got %q",
-			repository.savedRegistration.RegistrationID)
-	}
-
-	if repository.savedRegistration.MeterID != "METER-001" {
-		t.Errorf("expected meter ID METER-001, got %q",
-			repository.savedRegistration.MeterID)
-	}
-
-	if repository.savedRegistration.UserReference != "USER-123" {
-		t.Errorf("expected user reference USER-123, got %q",
-			repository.savedRegistration.UserReference)
-	}
-}
-
-func TestInitiateMeterClaimDEWAFailureAfterPersistence(t *testing.T) {
-	repository := &capturingRegistrationRepository{}
-	service := NewService(repository, &failingDEWAClient{})
-
-	_, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		RegistrationID: "REG-123",
-		MeterID:        "METER-001",
-		UserReference:  "USER-123",
-	})
+	response, err := service.RegisterHouse(context.Background(), request)
 
 	if err == nil {
-		t.Fatal("expected error when DEWA dispatch fails")
+		t.Fatal("expected an error for missing registration ID")
 	}
 
-	if !strings.Contains(err.Error(), "dispatch registration to DEWA") {
-		t.Errorf("expected DEWA dispatch error, got: %v", err)
-	}
-
-	if !repository.called {
-		t.Fatal("expected registration to be saved before DEWA dispatch")
-	}
-
-	if repository.savedRegistration.ApprovalStatus != ApprovalPending {
-		t.Errorf("expected saved status %q, got %q",
-			ApprovalPending, repository.savedRegistration.ApprovalStatus)
+	if response != nil {
+		t.Errorf("expected nil response, got %+v", response)
 	}
 }
 
-func TestInitiateMeterClaimSuccessfulDispatch(t *testing.T) {
-	repository := &capturingRegistrationRepository{}
-	service := NewService(repository, &testDEWAClient{})
+func TestRegisterHouseMissingMeterID(t *testing.T) {
+	service := NewService(NewClient("http://localhost"))
 
-	const expectedID = "REG-456"
-
-	result, err := service.InitiateMeterClaim(context.Background(), InitiateClaimRequest{
-		RegistrationID: expectedID,
-		MeterID:        "METER-002",
-		UserReference:  "USER-456",
-	})
-	if err != nil {
-		t.Fatalf("expected successful dispatch, got error: %v", err)
+	request := LinkRequest{
+		RegistrationID: "reg-123",
+		UserReference:  "user-001",
 	}
 
-	if result == nil {
-		t.Fatal("expected a registration result")
+	response, err := service.RegisterHouse(context.Background(), request)
+
+	if err == nil {
+		t.Fatal("expected an error for missing meter ID")
 	}
 
-	if result.RegistrationID != expectedID {
-		t.Errorf("expected registration ID %q, got %q",
-			expectedID, result.RegistrationID)
+	if response != nil {
+		t.Errorf("expected nil response, got %+v", response)
+	}
+}
+
+func TestRegisterHouseMissingUserReference(t *testing.T) {
+	service := NewService(NewClient("http://localhost"))
+
+	request := LinkRequest{
+		RegistrationID: "reg-123",
+		MeterID:        "meter-001",
 	}
 
-	if result.Status != "PENDING" {
-		t.Errorf("expected DEWA status PENDING, got %q", result.Status)
+	response, err := service.RegisterHouse(context.Background(), request)
+
+	if err == nil {
+		t.Fatal("expected an error for missing user reference")
 	}
 
-	if !repository.called {
-		t.Fatal("expected registration to be saved")
+	if response != nil {
+		t.Errorf("expected nil response, got %+v", response)
+	}
+}
+
+func TestRegisterHouseNilClient(t *testing.T) {
+	service := NewService(nil)
+
+	request := LinkRequest{
+		RegistrationID: "reg-123",
+		MeterID:        "meter-001",
+		UserReference:  "user-001",
 	}
 
-	if repository.savedRegistration.ApprovalStatus != ApprovalPending {
-		t.Errorf("expected persisted approval status %q, got %q",
-			ApprovalPending, repository.savedRegistration.ApprovalStatus)
+	response, err := service.RegisterHouse(context.Background(), request)
+
+	if err == nil {
+		t.Fatal("expected an error for nil client")
+	}
+
+	if response != nil {
+		t.Errorf("expected nil response, got %+v", response)
 	}
 }
