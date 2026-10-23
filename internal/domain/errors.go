@@ -31,6 +31,10 @@ func NewValidationError(field, reason string) error {
 	return &ValidationError{Field: field, Reason: reason}
 }
 
+// ErrNotFound marks a lookup of a house or reading that does not exist, or
+// that the caller is not allowed to see.
+var ErrNotFound = errors.New("domain: not found")
+
 // ErrIntegrityConflict marks a record whose identity already exists in
 // durable history with different values. Retrying can never fix it and
 // history is never overwritten, so it is classified as permanent.
