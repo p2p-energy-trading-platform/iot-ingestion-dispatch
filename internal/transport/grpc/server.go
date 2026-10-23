@@ -99,3 +99,9 @@ func (server *Server) Stop() {
 	}
 
 }
+
+// RegisterService makes Server a grpc.ServiceRegistrar, so each feature's
+// generated Register...Server function can attach its service directly.
+func (server *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
+	server.server.RegisterService(desc, impl)
+}
