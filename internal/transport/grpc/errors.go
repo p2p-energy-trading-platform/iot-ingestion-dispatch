@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"context"
 	"errors"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
@@ -19,6 +20,18 @@ func ToGRPCError(err error) error {
 
 	if errors.Is(err, domain.ErrValidation) {
 		return status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, "request canceled")
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, "deadline exceeded")
+	}
+
+	if errors.Is(err, domain.ErrNotFound) {
+		return status.Error(codes.NotFound, err.Error())
 	}
 
 	if errors.Is(err, domain.ErrIntegrityConflict) {
