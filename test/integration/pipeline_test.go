@@ -41,7 +41,20 @@ func newEnv(t *testing.T) *env {
 	if _, err := gooseProvider(t, dsn).Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openDB(t, dsn).ExecContext(ctx, `
+
+	db := openDB(t, dsn)
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO iot_data.grids (grid_id, lat, lon, display_name) VALUES 
+		('grid01', 6.9271, 79.8612, 'Grid 01'),
+		('grid02', 9.6615, 80.0255, 'Grid 02'),
+		('grid03', 7.8731, 80.6550, 'Grid 03')
+		ON CONFLICT (grid_id) DO NOTHING;
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db(t, dsn).ExecContext(ctx, `
 		INSERT INTO iot_data.houses (house_id, grid_id, device_class, meter_id)
 		VALUES ('grid01-house0042', 'grid01', 'residential_prosumer', 'meter-grid01-house0042')`); err != nil {
 		t.Fatal(err)
