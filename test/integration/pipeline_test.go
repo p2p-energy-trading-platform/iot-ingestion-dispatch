@@ -54,7 +54,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 
-	if _, err := db(t, dsn).ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO iot_data.houses (house_id, grid_id, device_class, meter_id)
 		VALUES ('grid01-house0042', 'grid01', 'residential_prosumer', 'meter-grid01-house0042')`); err != nil {
 		t.Fatal(err)
