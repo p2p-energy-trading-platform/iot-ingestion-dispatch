@@ -1,4 +1,3 @@
-
 package registration
 
 import (
@@ -42,7 +41,7 @@ func (c *Client) CreateLinkRequest(
 ) (*LinkResponse, error) {
 
 	payload, err := json.Marshal(request)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("marshal DEWA link request: %w", err)
 	}
