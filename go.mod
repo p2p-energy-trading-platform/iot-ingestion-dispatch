@@ -8,6 +8,7 @@ require (
 	github.com/docker/go-connections v0.7.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
+	github.com/p2p-energy-trading-platform/go-sdk v1.16.0
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.22.0
@@ -17,7 +18,8 @@ require (
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.45.0
 	go.opentelemetry.io/otel/sdk v1.45.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -86,7 +88,6 @@ require (
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 )
