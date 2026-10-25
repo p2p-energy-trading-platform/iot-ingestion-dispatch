@@ -15,6 +15,12 @@ const (
 	defaultPollTimeout  = 10 * time.Minute
 )
 
+type LinkRequestDetail struct {
+	RegistrationID string `json:"registrationId"`
+	MeterID        string `json:"meterId"`
+	Status         string `json:"status"`
+}
+
 // Poller checks the status of a DEWA link request.
 type Poller struct {
 	client   *Client
@@ -36,7 +42,7 @@ func NewPoller(client *Client) *Poller {
 func (p *Poller) PollLinkRequest(
 	ctx context.Context,
 	requestID string,
-) (*LinkResponse, error) {
+) (*LinkRequestDetail, error) {
 	if p == nil || p.client == nil {
 		return nil, fmt.Errorf("registration client is not configured")
 	}
@@ -79,32 +85,32 @@ func (p *Poller) PollLinkRequest(
 		}
 
 		response, err := p.getStatus(pollCtx, endpoint)
-		if err != nil {
+		if err == nil {
+			switch strings.ToUpper(strings.TrimSpace(response.Status)) {
+			case "APPROVED":
+				response.Status = "APPROVED"
+				return response, nil
+
+			case "REJECTED":
+				response.Status = "REJECTED"
+				return response, nil
+
+			case "PENDING", "PROCESSING":
+				// Registration is still in progress.
+				// Wait before checking DEWA again.
+
+			default:
+				return nil, fmt.Errorf(
+					"unexpected DEWA registration status: %q",
+					response.Status,
+				)
+			}
+		} else {
 			if pollCtx.Err() != nil {
 				return nil, p.pollingError(pollCtx.Err())
 			}
 
-			return nil, err
-		}
-
-		switch strings.ToUpper(strings.TrimSpace(response.Status)) {
-		case "APPROVED":
-			response.Status = "APPROVED"
-			return response, nil
-
-		case "REJECTED":
-			response.Status = "REJECTED"
-			return response, nil
-
-		case "PENDING", "PROCESSING":
-			// Registration is still in progress.
-			// Wait before checking DEWA again.
-
-		default:
-			return nil, fmt.Errorf(
-				"unexpected DEWA registration status: %q",
-				response.Status,
-			)
+			// transient network glitch
 		}
 
 		select {
@@ -134,7 +140,7 @@ func (p *Poller) pollingError(err error) error {
 func (p *Poller) getStatus(
 	ctx context.Context,
 	endpoint string,
-) (*LinkResponse, error) {
+) (*LinkRequestDetail, error) {
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -167,7 +173,7 @@ func (p *Poller) getStatus(
 		)
 	}
 
-	var response LinkResponse
+	var response LinkRequestDetail
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf(
