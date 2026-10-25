@@ -50,8 +50,8 @@ func (s *Store) SaveMeterRegistration(
 		registration.UserID,
 		registration.MeterID,
 		registration.RegistrationID,
-		registration.Role,
-		registration.ApprovalStatus,
+		role,
+		status,
 	)
 	if err != nil {
 		return fmt.Errorf("save meter registration: %w", err)
