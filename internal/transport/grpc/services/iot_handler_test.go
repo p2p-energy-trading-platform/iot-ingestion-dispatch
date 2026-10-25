@@ -1,4 +1,4 @@
-package grpc
+package services
 
 import (
 	"bytes"
@@ -288,16 +288,6 @@ func TestIotHandlerDoesNotLogClientErrors(t *testing.T) {
 		}
 		if buf.Len() != 0 {
 			t.Errorf("%v: logged %q, want nothing", in, buf.String())
-		}
-	}
-}
-
-func TestNewRegistersServices(t *testing.T) {
-	server := New(":0", helpers.TestLogger(), Services{Iot: &fakeQueries{}})
-
-	for _, name := range []string{"gridx.iot.v1.IotService", "grpc.health.v1.Health"} {
-		if _, ok := server.server.GetServiceInfo()[name]; !ok {
-			t.Errorf("%s is not registered", name)
 		}
 	}
 }

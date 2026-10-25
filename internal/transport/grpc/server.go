@@ -14,9 +14,9 @@ import (
 
 const gracefulStopTimeout = 5 * time.Second
 
-// Services holds what the gRPC services served by this server depend on.
+// Services holds the handlers this server registers next to the health service.
 type Services struct {
-	Iot IotQueries
+	Iot iotv1.IotServiceServer
 }
 
 type Server struct {
@@ -48,7 +48,7 @@ func New(address string, logger *slog.Logger, services Services) *Server {
 		logger = slog.Default()
 	}
 
-	iotv1.RegisterIotServiceServer(server, NewIotHandler(services.Iot, logger))
+	iotv1.RegisterIotServiceServer(server, services.Iot)
 
 	return &Server{
 		address: address,

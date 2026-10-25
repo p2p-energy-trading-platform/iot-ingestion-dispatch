@@ -1,4 +1,4 @@
-package grpc
+package services
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/query"
 	postgresstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
 	redisstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/redis"
+	grpctransport "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/transport/grpc"
 )
 
 // IotQueries is what IotHandler needs from query.Service.
@@ -44,7 +45,7 @@ func (s *IotHandler) fail(ctx context.Context, method string, err error) error {
 		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		s.logger.ErrorContext(ctx, "iot query failed", "method", method, "error", err)
 	}
-	return ToGRPCError(err)
+	return grpctransport.ToGRPCError(err)
 }
 
 func (s *IotHandler) ListHouses(ctx context.Context, req *iotv1.ListHousesRequest) (*iotv1.ListHousesResponse, error) {

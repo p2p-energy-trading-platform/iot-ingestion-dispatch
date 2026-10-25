@@ -13,6 +13,7 @@ import (
 	postgresstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
 	redisstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/redis"
 	grpctransport "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/transport/grpc"
+	grpcservices "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/transport/grpc/services"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/transport/httphealth"
 )
 
@@ -179,7 +180,9 @@ func New(
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,
 		logger,
-		grpctransport.Services{Iot: query.NewService(postgres, postgres, redis, redis)},
+		grpctransport.Services{
+			Iot: grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger),
+		},
 	)
 
 	healthServer := httphealth.New(

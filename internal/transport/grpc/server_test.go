@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	iotv1 "github.com/p2p-energy-trading-platform/go-sdk/gen/gridx/iot/v1"
 	"testing"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/test/helpers"
@@ -10,7 +11,7 @@ import (
 
 // TestNewServerNotServing checks that a new server is not ready initially.
 func TestNewServerNotServing(t *testing.T) {
-	server := New(":50051", helpers.TestLogger(), Services{Iot: &fakeQueries{}})
+	server := New(":50051", helpers.TestLogger(), Services{Iot: iotv1.UnimplementedIotServiceServer{}})
 
 	response, err := server.health.Check(
 		context.Background(),
@@ -30,7 +31,7 @@ func TestNewServerNotServing(t *testing.T) {
 
 // TestSetReady checks that SetReady updates the health status correctly.
 func TestSetReady(t *testing.T) {
-	server := New(":50051", helpers.TestLogger(), Services{Iot: &fakeQueries{}})
+	server := New(":50051", helpers.TestLogger(), Services{Iot: iotv1.UnimplementedIotServiceServer{}})
 
 	// Test that setting ready to true reports SERVING.
 	server.SetReady(true)
