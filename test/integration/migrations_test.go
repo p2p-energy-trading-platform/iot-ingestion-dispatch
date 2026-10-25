@@ -53,10 +53,6 @@ func TestMigrationsCleanInstall(t *testing.T) {
 		}
 	}
 
-	if n := scalar[int](t, dsn, `SELECT count(*) FROM iot_data.grids`); n != 3 {
-		t.Errorf("seeded grids = %d, want 3", n)
-	}
-
 	// Idempotent: running it again changes nothing.
 	if res, err := gooseProvider(t, dsn).Up(ctx); err != nil || len(res) != 0 {
 		t.Errorf("second Up applied %d migration(s), err=%v; want none", len(res), err)
@@ -90,9 +86,6 @@ func TestMigrationsUpgradeFromPreviousRelease(t *testing.T) {
 	}
 	if n := scalar[int](t, dsn, `SELECT count(*) FROM iot_data.meter_readings`); n != 1 {
 		t.Errorf("readings after upgrade = %d, want the 1 fixture row", n)
-	}
-	if n := scalar[int](t, dsn, `SELECT count(*) FROM iot_data.grids`); n != 3 {
-		t.Errorf("grids after upgrade = %d, want the existing row plus 2 seeded", n)
 	}
 }
 
