@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+type mockStore struct {
+	saveFunc   func(ctx context.Context, reg RegistrationRecord) error
+	getFunc    func(ctx context.Context, registrationID string) (*RegistrationRecord, error)
+	updateFunc func(ctx context.Context, registrationID string, status string) error
+}
+
+func (m *mockStore) SaveMeterRegistration(ctx context.Context, reg RegistrationRecord) error {
+	if m.saveFunc != nil {
+		return m.saveFunc(ctx, reg)
+	}
+	return nil
+}
+
+func (m *mockStore) GetByRegistrationID(ctx context.Context, registrationID string) (*RegistrationRecord, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, registrationID)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error {
+	if m.updateFunc != nil {
+		return m.updateFunc(ctx, registrationID, status)
+	}
+	return nil
+}
+
 func TestRegisterHouseSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -32,15 +59,26 @@ func TestRegisterHouseSuccess(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 
+			// Updated to include requestId matching the modified DEWA mock contract
 			_, _ = w.Write([]byte(
-				`{"status":"PENDING","message":"Link request created"}`,
+				`{"requestId":"server-uuid-123","status":"PENDING","message":"Link request created"}`,
 			))
 		},
 	))
 	defer server.Close()
 
 	client := NewClient(server.URL)
-	service := NewService(client)
+	poller := NewPoller(client)
+	store := &mockStore{
+		saveFunc: func(ctx context.Context, reg RegistrationRecord) error {
+			return nil
+		},
+		updateFunc: func(ctx context.Context, registrationID string, status string) error {
+			return nil
+		},
+	}
+
+	service := NewService(client, poller, store)
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -60,10 +98,16 @@ func TestRegisterHouseSuccess(t *testing.T) {
 	if response.Message != "Link request created" {
 		t.Errorf("unexpected message: %s", response.Message)
 	}
+
+	if response.RequestID != "server-uuid-123" {
+		t.Errorf("expected requestId 'server-uuid-123', got %s", response.RequestID)
+	}
 }
 
 func TestRegisterHouseMissingRegistrationID(t *testing.T) {
-	service := NewService(NewClient("http://localhost"))
+	client := NewClient("http://localhost")
+	store := &mockStore{}
+	service := NewService(client, nil, store)
 
 	request := LinkRequest{
 		MeterID:       "meter-001",
@@ -82,7 +126,9 @@ func TestRegisterHouseMissingRegistrationID(t *testing.T) {
 }
 
 func TestRegisterHouseMissingMeterID(t *testing.T) {
-	service := NewService(NewClient("http://localhost"))
+	client := NewClient("http://localhost")
+	store := &mockStore{}
+	service := NewService(client, nil, store)
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -101,7 +147,9 @@ func TestRegisterHouseMissingMeterID(t *testing.T) {
 }
 
 func TestRegisterHouseMissingUserReference(t *testing.T) {
-	service := NewService(NewClient("http://localhost"))
+	client := NewClient("http://localhost")
+	store := &mockStore{}
+	service := NewService(client, nil, store)
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -119,8 +167,9 @@ func TestRegisterHouseMissingUserReference(t *testing.T) {
 	}
 }
 
-func TestRegisterHouseNilClient(t *testing.T) {
-	service := NewService(nil)
+func TestRegisterHouseNilClientOrStore(t *testing.T) {
+	// Testing with nil client/store configuration
+	service := NewService(nil, nil, nil)
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -131,7 +180,7 @@ func TestRegisterHouseNilClient(t *testing.T) {
 	response, err := service.RegisterHouse(context.Background(), request)
 
 	if err == nil {
-		t.Fatal("expected an error for nil client")
+		t.Fatal("expected an error for nil client or store")
 	}
 
 	if response != nil {
