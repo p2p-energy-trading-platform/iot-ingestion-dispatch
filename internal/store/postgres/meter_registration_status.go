@@ -13,7 +13,7 @@ func (s *Store) UpdateMeterRegistrationStatus(
 ) error {
 	const query = `
 		UPDATE iot_data.meter_registrations
-		SET approval_status = $2,
+		SET approval_status = $2::iot_data.meter_approval_status,
 		    updated_at = NOW()
 		WHERE registration_id = $1
 	`
