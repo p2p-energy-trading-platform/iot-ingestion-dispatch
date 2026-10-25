@@ -12,17 +12,18 @@ import (
 )
 
 type Config struct {
-	Service   ServiceConfig
-	Kafka     KafkaConfig
-	Postgres  PostgresConfig
-	Redis     RedisConfig
-	GRPC      GRPCConfig
-	Health    HealthConfig
-	Admission AdmissionConfig
-	Retry     RetryConfig
-	Input     InputConfig
-	Metrics   MetricsConfig
-	Tracing   TracingConfig
+	Service         ServiceConfig
+	Kafka           KafkaConfig
+	Postgres        PostgresConfig
+	Redis           RedisConfig
+	GRPC            GRPCConfig
+	Health          HealthConfig
+	Admission       AdmissionConfig
+	Retry           RetryConfig
+	Input           InputConfig
+	Metrics         MetricsConfig
+	Tracing         TracingConfig
+	ExternalUtility ExternalUtilityConfig
 }
 
 // InputConfig bounds what a single Kafka record may be before it is decoded.
@@ -61,6 +62,10 @@ type ServiceConfig struct {
 	Environment     string
 	LogLevel        string
 	ShutdownTimeout time.Duration
+}
+
+type ExternalUtilityConfig struct {
+	BaseUrl string
 }
 
 // IsProduction reports whether production-only safety rules apply.
@@ -239,6 +244,9 @@ func Load() (*Config, error) {
 		Tracing: TracingConfig{
 			Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 			Insecure: r.boolean("OTEL_EXPORTER_OTLP_INSECURE", true),
+		},
+		ExternalUtility: ExternalUtilityConfig{
+			BaseUrl: os.Getenv("DEWA_MOCK_APP_URL"),
 		},
 	}
 

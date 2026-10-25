@@ -9,6 +9,8 @@ services:
       KAFKA_BROKER: kafka:29092
       POSTGRES_URL: ${DOCKER_POSTGRES_URL}
       REDIS_ADDRESS: redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       kafka:
         condition: service_healthy

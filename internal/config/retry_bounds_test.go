@@ -17,6 +17,7 @@ func TestRetryMaxTriesBoundsViaLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("POSTGRES_URL", "postgres://u:p@localhost:5432/db")
+			t.Setenv("DEWA_MOCK_APP_URL", "http://localhost:8081")
 			t.Setenv("INGESTION_RETRY_MAX_TRIES", tt.value)
 
 			_, err := Load()

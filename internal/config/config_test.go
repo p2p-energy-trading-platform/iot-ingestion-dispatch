@@ -23,6 +23,9 @@ func TestConfigValidate(t *testing.T) {
 				Postgres: PostgresConfig{
 					URL: "postgres://user:password@localhost:5432/test",
 				},
+				ExternalUtility: ExternalUtilityConfig{
+					BaseUrl: "http://localhost:8081",
+				},
 				Retry: RetryConfig{
 					MaxTries:        3,
 					InitialInterval: 100,
@@ -96,6 +99,7 @@ func TestConfigValidate(t *testing.T) {
 func validLoadEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("POSTGRES_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("DEWA_MOCK_APP_URL", "http://localhost:8081")
 }
 
 func TestLoadRejectsMalformedValues(t *testing.T) {
@@ -157,11 +161,12 @@ func TestLoadDefaults(t *testing.T) {
 func TestProductionRules(t *testing.T) {
 	base := func() Config {
 		return Config{
-			Service:  ServiceConfig{Environment: "production"},
-			Kafka:    KafkaConfig{Brokers: []string{"k:9093"}, TLS: true},
-			Postgres: PostgresConfig{URL: "postgres://u:p@db/x?sslmode=verify-full"},
-			Redis:    RedisConfig{TLS: true, AckPolicy: RedisAckRequired},
-			Retry:    RetryConfig{MaxTries: 3, InitialInterval: 1, MaxInterval: 2},
+			Service:         ServiceConfig{Environment: "production"},
+			Kafka:           KafkaConfig{Brokers: []string{"k:9093"}, TLS: true},
+			Postgres:        PostgresConfig{URL: "postgres://u:p@db/x?sslmode=verify-full"},
+			Redis:           RedisConfig{TLS: true, AckPolicy: RedisAckRequired},
+			Retry:           RetryConfig{MaxTries: 3, InitialInterval: 1, MaxInterval: 2},
+			ExternalUtility: ExternalUtilityConfig{BaseUrl: "http://localhost:8081"},
 		}
 	}
 	if err := base().Validate(); err != nil {
@@ -188,9 +193,10 @@ func TestProductionRules(t *testing.T) {
 
 func TestValidateRejectsContradictions(t *testing.T) {
 	ok := Config{
-		Kafka:    KafkaConfig{Brokers: []string{"k:9092"}},
-		Postgres: PostgresConfig{URL: "postgres://u:p@db/x"},
-		Retry:    RetryConfig{MaxTries: 3, InitialInterval: 1, MaxInterval: 2},
+		Kafka:           KafkaConfig{Brokers: []string{"k:9092"}},
+		Postgres:        PostgresConfig{URL: "postgres://u:p@db/x"},
+		Retry:           RetryConfig{MaxTries: 3, InitialInterval: 1, MaxInterval: 2},
+		ExternalUtility: ExternalUtilityConfig{BaseUrl: "http://localhost:8081"},
 	}
 	mutations := map[string]func(*Config){
 		"unknown ack policy":     func(c *Config) { c.Redis.AckPolicy = "maybe" },

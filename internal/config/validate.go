@@ -90,5 +90,9 @@ func (config Config) Validate() error {
 		}
 	}
 
+	if strings.TrimSpace(config.ExternalUtility.BaseUrl) == "" {
+		return fmt.Errorf("DEWA_MOCK_APP_URL is required")
+	}
+
 	return errors.Join(errs...)
 }
