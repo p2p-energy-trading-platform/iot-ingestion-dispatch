@@ -1,4 +1,4 @@
-package services
+package grpc
 
 import (
 	"bytes"
@@ -69,7 +69,7 @@ func strp(v string) *string   { return &v }
 
 var beat = time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
 
-func TestIotServerListHousesMapping(t *testing.T) {
+func TestIotHandlerListHousesMapping(t *testing.T) {
 	f := &fakeQueries{houses: query.ListHousesResult{
 		NextPageToken: "next",
 		Houses: []query.House{
@@ -113,7 +113,7 @@ func TestIotServerListHousesMapping(t *testing.T) {
 	}
 }
 
-func TestIotServerGetHouseAssets(t *testing.T) {
+func TestIotHandlerGetHouseAssets(t *testing.T) {
 	f := &fakeQueries{
 		house: query.House{HouseInfoRow: postgresstore.HouseInfoRow{HouseID: "h1", GridID: "grid01", DeviceClass: "consumer"}},
 		assets: []postgresstore.FlexibleAssetRow{
@@ -138,7 +138,7 @@ func TestIotServerGetHouseAssets(t *testing.T) {
 	}
 }
 
-func TestIotServerLatestReading(t *testing.T) {
+func TestIotHandlerLatestReading(t *testing.T) {
 	at := time.Date(2026, 10, 23, 10, 0, 5, 123_000_000, time.UTC)
 	f := &fakeQueries{latest: redisstore.MeterProjection{
 		EventTimeUnixMs: at.UnixMilli(), Seq: 42, MeterID: "m1", SolarKw: 3.8, ConsumptionKw: 2.5, NetKw: 0.1,
@@ -165,7 +165,7 @@ func TestIotServerLatestReading(t *testing.T) {
 	}
 }
 
-func TestIotServerEnergyRequestsPassThrough(t *testing.T) {
+func TestIotHandlerEnergyRequestsPassThrough(t *testing.T) {
 	start := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
 	f := &fakeQueries{series: []query.EnergyBucket{{
@@ -217,7 +217,7 @@ func TestIotServerEnergyRequestsPassThrough(t *testing.T) {
 	}
 }
 
-func TestIotServerSummaryOptionalFields(t *testing.T) {
+func TestIotHandlerSummaryOptionalFields(t *testing.T) {
 	peakAt := time.Date(2026, 10, 23, 19, 0, 0, 0, time.UTC)
 	full := &fakeQueries{summary: query.EnergySummary{
 		EnergySummaryRow: postgresstore.EnergySummaryRow{
@@ -249,7 +249,7 @@ func TestIotServerSummaryOptionalFields(t *testing.T) {
 	}
 }
 
-func TestIotServerErrorCodes(t *testing.T) {
+func TestIotHandlerErrorCodes(t *testing.T) {
 	cases := map[error]codes.Code{
 		domain.NewValidationError("start_time", "is required"): codes.InvalidArgument,
 		domain.ErrNotFound:                         codes.NotFound,
@@ -264,7 +264,7 @@ func TestIotServerErrorCodes(t *testing.T) {
 	}
 }
 
-func TestIotServerLogsInternalCause(t *testing.T) {
+func TestIotHandlerLogsInternalCause(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -279,7 +279,7 @@ func TestIotServerLogsInternalCause(t *testing.T) {
 	}
 }
 
-func TestIotServerDoesNotLogClientErrors(t *testing.T) {
+func TestIotHandlerDoesNotLogClientErrors(t *testing.T) {
 	for _, in := range []error{domain.NewValidationError("end_time", "must be after start_time"), domain.ErrNotFound, context.Canceled} {
 		var buf bytes.Buffer
 		srv := NewIotHandler(&fakeQueries{err: in}, slog.New(slog.NewTextHandler(&buf, nil)))
@@ -288,6 +288,16 @@ func TestIotServerDoesNotLogClientErrors(t *testing.T) {
 		}
 		if buf.Len() != 0 {
 			t.Errorf("%v: logged %q, want nothing", in, buf.String())
+		}
+	}
+}
+
+func TestNewRegistersServices(t *testing.T) {
+	server := New(":0", helpers.TestLogger(), Services{Iot: &fakeQueries{}})
+
+	for _, name := range []string{"gridx.iot.v1.IotService", "grpc.health.v1.Health"} {
+		if _, ok := server.server.GetServiceInfo()[name]; !ok {
+			t.Errorf("%s is not registered", name)
 		}
 	}
 }

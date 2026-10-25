@@ -6,12 +6,18 @@ import (
 	"net"
 	"time"
 
+	iotv1 "github.com/p2p-energy-trading-platform/go-sdk/gen/gridx/iot/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
 const gracefulStopTimeout = 5 * time.Second
+
+// Services holds what the gRPC services served by this server depend on.
+type Services struct {
+	Iot IotQueries
+}
 
 type Server struct {
 	address string
@@ -20,7 +26,7 @@ type Server struct {
 	logger  *slog.Logger
 }
 
-func New(address string, logger *slog.Logger) *Server {
+func New(address string, logger *slog.Logger, services Services) *Server {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(4<<20),
 		grpc.MaxSendMsgSize(4<<20),
@@ -41,6 +47,8 @@ func New(address string, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+
+	iotv1.RegisterIotServiceServer(server, NewIotHandler(services.Iot, logger))
 
 	return &Server{
 		address: address,
@@ -98,10 +106,4 @@ func (server *Server) Stop() {
 		<-stopped
 	}
 
-}
-
-// RegisterService makes Server a grpc.ServiceRegistrar, so each feature's
-// generated Register...Server function can attach its service directly.
-func (server *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
-	server.server.RegisterService(desc, impl)
 }
