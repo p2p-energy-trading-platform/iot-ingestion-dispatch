@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type LinkResponse struct {
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
 func NewClient(baseURL string) *Client {
@@ -66,7 +68,12 @@ func (c *Client) CreateLinkRequest(
 	if err != nil {
 		return nil, fmt.Errorf("send DEWA link request: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("Create link request failed", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode < http.StatusOK ||
 		resp.StatusCode >= http.StatusMultipleChoices {

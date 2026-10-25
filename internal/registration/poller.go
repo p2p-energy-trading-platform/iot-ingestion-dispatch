@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ type Poller struct {
 	client   *Client
 	interval time.Duration
 	timeout  time.Duration
+	logger   *slog.Logger
 }
 
 // NewPoller creates a poller with the default interval and timeout.
@@ -163,7 +165,12 @@ func (p *Poller) getStatus(
 			err,
 		)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.Error("Get status failed", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode < http.StatusOK ||
 		resp.StatusCode >= http.StatusMultipleChoices {
