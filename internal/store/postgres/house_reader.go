@@ -12,25 +12,27 @@ import (
 
 const houseInfoColumns = `
 h.house_id, h.grid_id, COALESCE(g.display_name, ''), COALESCE(h.meter_id, ''),
-h.device_class, h.rated_solar_kw, o.user_reference`
+h.device_class, h.rated_solar_kw, o.user_id`
 
 // houseSource joins each house to its grid and to its owner: the user of the
-// latest APPROVED DEWA meter registration for the house's meter. Pending,
-// rejected and timed-out claims grant no ownership.
+// APPROVED, PRIMARY_OWNER DEWA meter registration for the house's meter (at
+// most one per meter). Viewers, operators and pending, rejected or expired
+// claims grant no ownership.
 const houseSource = `
 FROM iot_data.houses h
 LEFT JOIN iot_data.grids g ON g.grid_id = h.grid_id
 LEFT JOIN LATERAL (
-  SELECT r.user_reference
+  SELECT r.user_id::text AS user_id
   FROM iot_data.meter_registrations r
-  WHERE r.meter_id = h.meter_id AND r.approval_status = 'APPROVED'
-  ORDER BY r.updated_at DESC, r.registration_id DESC
+  WHERE r.meter_id = h.meter_id
+    AND r.approval_status = 'APPROVED'
+    AND r.role = 'PRIMARY_OWNER'
   LIMIT 1
 ) o ON true`
 
 const listHousesSQL = `
 SELECT` + houseInfoColumns + houseSource + `
-WHERE ($1 = '' OR o.user_reference = $1)
+WHERE ($1 = '' OR o.user_id = $1)
   AND ($2 = '' OR h.grid_id = $2)
   AND h.house_id > $3
 ORDER BY h.house_id
