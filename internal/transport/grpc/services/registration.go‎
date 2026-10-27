@@ -1,0 +1,28 @@
+package grpc
+
+import (
+    "log/slog"
+
+    registration "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
+)
+
+
+type RegistrationHandler struct {
+
+	logger               *slog.Logger
+	registrationDevice   *registration.Service
+
+}
+
+
+func NewRegistrationHandler(
+	registrationDevice   *registration.Service,
+	logger   *slog.Logger,
+) *RegistrationHandler {
+
+	return &RegistrationHandler{
+		logger:     logger,
+		registrationDevice: registrationDevice,
+	}
+
+}
