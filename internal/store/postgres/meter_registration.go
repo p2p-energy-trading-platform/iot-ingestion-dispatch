@@ -86,3 +86,58 @@ func (s *Store) GetByRegistrationByID(
 
 	return &reg, nil
 }
+
+func (s *Store) GetRegistrationByMeterID(
+	ctx context.Context,
+	meterID string,
+) (*MeterRegistration, error) {
+	const query = `
+        SELECT id, user_id, registration_id, meter_id, role, approval_status
+        FROM iot_data.meter_registrations
+        WHERE meter_id = $1
+    `
+
+	var reg MeterRegistration
+	err := s.pool.QueryRow(ctx, query, meterID).Scan(
+		&reg.ID,
+		&reg.UserID,
+		&reg.RegistrationID,
+		&reg.MeterID,
+		&reg.Role,
+		&reg.ApprovalStatus,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("get registration by meter ID %q: %w", meterID, err)
+	}
+
+	return &reg, nil
+}
+
+func (s *Store) GetRegistrationByUserID(
+	ctx context.Context,
+	userID string,
+) (*MeterRegistration, error) {
+	const query = `
+        SELECT id, user_id, registration_id, meter_id, role, approval_status
+        FROM iot_data.meter_registrations
+        WHERE user_id = $1
+        LIMIT 1
+    `
+
+	var reg MeterRegistration
+	err := s.pool.QueryRow(ctx, query, userID).Scan(
+		&reg.ID,
+		&reg.UserID,
+		&reg.RegistrationID,
+		&reg.MeterID,
+		&reg.Role,
+		&reg.ApprovalStatus,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("get registration by user ID %q: %w", userID, err)
+	}
+
+	return &reg, nil
+}
