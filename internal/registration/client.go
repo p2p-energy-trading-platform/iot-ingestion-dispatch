@@ -17,6 +17,7 @@ type LinkRequest struct {
 }
 
 type LinkResponse struct {
+	RequestID string `json:"requestId"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
 }

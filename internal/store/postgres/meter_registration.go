@@ -7,19 +7,24 @@ import (
 
 // MeterRegistration represents a smart meter registration record.
 type MeterRegistration struct {
+
 	ID             string
 	UserID         string
 	RegistrationID string
 	MeterID        string
 	Role           string
 	ApprovalStatus string
+
 }
 
 // SaveMeterRegistration saves a meter registration in PostgreSQL.
 func (s *Store) SaveMeterRegistration(
+
 	ctx context.Context,
 	registration MeterRegistration,
+
 ) error {
+
 	const query = `
 		INSERT INTO iot_data.meter_registrations (
 			user_id,
@@ -58,12 +63,16 @@ func (s *Store) SaveMeterRegistration(
 	}
 
 	return nil
+
 }
 
 func (s *Store) GetRegistrationByID(
+
 	ctx context.Context,
 	registrationID string,
+
 ) (*MeterRegistration, error) {
+
 	const query = `
 		SELECT id, user_id, meter_id, registration_id, role, approval_status
 		FROM iot_data.meter_registrations
@@ -85,4 +94,5 @@ func (s *Store) GetRegistrationByID(
 	}
 
 	return &reg, nil
+	
 }
