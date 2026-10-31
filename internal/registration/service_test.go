@@ -9,9 +9,11 @@ import (
 )
 
 type mockStore struct {
-	saveFunc   func(ctx context.Context, reg RegistrationRecord) error
-	getFunc    func(ctx context.Context, registrationID string) (*RegistrationRecord, error)
-	updateFunc func(ctx context.Context, registrationID string, status string) error
+	saveFunc          func(ctx context.Context, reg RegistrationRecord) error
+	getFunc           func(ctx context.Context, registrationID string) (*RegistrationRecord, error)
+	updateFunc        func(ctx context.Context, registrationID string, status string) error
+	getRegister       func(ctx context.Context, meterID string) (*RegistrationRecord, error)
+	getRegisterByUser func(ctx context.Context, userReference string) (*RegistrationRecord, error)
 }
 
 func (m *mockStore) SaveMeterRegistration(ctx context.Context, reg RegistrationRecord) error {
@@ -33,6 +35,20 @@ func (m *mockStore) UpdateMeterRegistrationStatus(ctx context.Context, registrat
 		return m.updateFunc(ctx, registrationID, status)
 	}
 	return nil
+}
+
+func (m *mockStore) GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, meterID)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, userReference)
+	}
+	return nil, nil
 }
 
 func TestRegisterHouseSuccess(t *testing.T) {
