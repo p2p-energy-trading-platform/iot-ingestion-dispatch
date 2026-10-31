@@ -16,7 +16,8 @@ const gracefulStopTimeout = 5 * time.Second
 
 // Services holds the handlers this server registers next to the health service.
 type Services struct {
-	Iot iotv1.IotServiceServer
+	Iot                iotv1.IotServiceServer
+	DeviceRegistration iotv1.DeviceRegistrationServiceServer
 }
 
 type Server struct {
@@ -49,6 +50,7 @@ func New(address string, logger *slog.Logger, services Services) *Server {
 	}
 
 	iotv1.RegisterIotServiceServer(server, services.Iot)
+	iotv1.RegisterDeviceRegistrationServiceServer(server, services.DeviceRegistration)
 
 	return &Server{
 		address: address,
