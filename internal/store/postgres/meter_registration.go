@@ -60,7 +60,7 @@ func (s *Store) SaveMeterRegistration(
 	return nil
 }
 
-func (s *Store) GetRegistrationByID(
+func (s *Store) GetByRegistrationByID(
 	ctx context.Context,
 	registrationID string,
 ) (*MeterRegistration, error) {
