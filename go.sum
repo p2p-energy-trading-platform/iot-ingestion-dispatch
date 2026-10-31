@@ -112,8 +112,8 @@ github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
-github.com/p2p-energy-trading-platform/go-sdk v1.16.0 h1:kYnBaeD0iRJkx0XlA2tDbanRhbc+FP2vD5Qel8N1EWE=
-github.com/p2p-energy-trading-platform/go-sdk v1.16.0/go.mod h1:SPJOv0vWP2oF41W0oJtbDUPQ+kbMB0Y/bRQhK+Ln5ZY=
+github.com/p2p-energy-trading-platform/go-sdk v1.17.1 h1:0y4yNqjau2tOwfrAwQCM3HJr9IQdRI3Y/BnR/xJY9Ic=
+github.com/p2p-energy-trading-platform/go-sdk v1.17.1/go.mod h1:SPJOv0vWP2oF41W0oJtbDUPQ+kbMB0Y/bRQhK+Ln5ZY=
 github.com/pierrec/lz4/v4 v4.1.27 h1:+PhzhWDrjRj89TH2sw43nE3+4+W8lSxIuQadEHZyjUk=
 github.com/pierrec/lz4/v4 v4.1.27/go.mod h1:EoQMVJgeeEOMsCqCzqFm2O0cJvljX2nGZjcRIPL34O4=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=

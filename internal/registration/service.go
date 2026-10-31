@@ -19,6 +19,8 @@ type RegistrationStore interface {
 	SaveMeterRegistration(ctx context.Context, reg RegistrationRecord) error
 	GetByRegistrationID(ctx context.Context, registrationID string) (*RegistrationRecord, error)
 	UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error
+	GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error)
+	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
 }
 
 // Service coordinates house registration with the DEWA API.
@@ -157,4 +159,42 @@ func (s *Service) ReverifyRegistration(
 	}
 
 	return resp, nil
+}
+
+// GetRegistration retrieves a registration record by its ID.
+func (s *Service) GetRegistration(ctx context.Context, registrationID string) (*RegistrationRecord, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+
+	return s.store.GetByRegistrationID(ctx, registrationID)
+}
+
+// GetByMeterID retrieves a registration record by its meter ID.
+func (s *Service) GetByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+
+	return s.store.GetRegistrationByMeterID(ctx, meterID)
+}
+
+func (s *Service) GetRegistrationByUser(ctx context.Context, userReference string) (*RegistrationRecord, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+
+	dbReg, err := s.store.GetRegistrationByUserID(ctx, userReference)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RegistrationRecord{
+		ID:             dbReg.ID,
+		UserID:         dbReg.UserID,
+		MeterID:        dbReg.MeterID,
+		RegistrationID: dbReg.RegistrationID,
+		Role:           dbReg.Role,
+		ApprovalStatus: dbReg.ApprovalStatus,
+	}, nil
 }
