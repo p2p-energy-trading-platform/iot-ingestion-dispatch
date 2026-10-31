@@ -148,7 +148,6 @@ func (h *RegistrationHandler) InitiateMeterClaim(
 	}, nil
 }
 
-
 func (h *RegistrationHandler) GetRegistrationStatus(
 	ctx context.Context,
 	req *iotv1.GetStatusRequest,

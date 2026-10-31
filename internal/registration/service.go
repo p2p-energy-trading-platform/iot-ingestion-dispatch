@@ -3,8 +3,8 @@ package registration
 import (
 	"context"
 	"fmt"
-	"strings"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
+	"strings"
 )
 
 // Service coordinates house registration with the DEWA API.
@@ -16,12 +16,11 @@ type Service struct {
 // NewService creates a registration service.
 func NewService(client *Client, store *postgres.Store) *Service {
 
-    return &Service{
+	return &Service{
 
-        client: client,
-        store:  store,
-
-    }
+		client: client,
+		store:  store,
+	}
 
 }
 
@@ -66,13 +65,11 @@ func (s *Service) RegisterHouse(
 		RegistrationID: request.RegistrationID,
 		Role:           "PRIMARY_OWNER",
 		ApprovalStatus: "DEWA_APPROVAL_PENDING",
-
 	}
 
 	if err := s.store.SaveMeterRegistration(ctx, registration); err != nil {
 		return nil, fmt.Errorf("save meter registration: %w", err)
 	}
-
 
 	return response, nil
 

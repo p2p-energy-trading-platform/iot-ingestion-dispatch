@@ -7,14 +7,12 @@ import (
 
 // MeterRegistration represents a smart meter registration record.
 type MeterRegistration struct {
-
 	ID             string
 	UserID         string
 	RegistrationID string
 	MeterID        string
 	Role           string
 	ApprovalStatus string
-
 }
 
 // SaveMeterRegistration saves a meter registration in PostgreSQL.
@@ -94,5 +92,5 @@ func (s *Store) GetRegistrationByID(
 	}
 
 	return &reg, nil
-	
+
 }
