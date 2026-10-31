@@ -3,6 +3,7 @@ package registration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,15 +39,15 @@ func (m *mockStore) UpdateMeterRegistrationStatus(ctx context.Context, registrat
 }
 
 func (m *mockStore) GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error) {
-	if m.getFunc != nil {
-		return m.getFunc(ctx, meterID)
+	if m.getRegister != nil {
+		return m.getRegister(ctx, meterID)
 	}
 	return nil, nil
 }
 
 func (m *mockStore) GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error) {
-	if m.getFunc != nil {
-		return m.getFunc(ctx, userReference)
+	if m.getRegisterByUser != nil {
+		return m.getRegisterByUser(ctx, userReference)
 	}
 	return nil, nil
 }
@@ -201,5 +202,80 @@ func TestRegisterHouseNilClientOrStore(t *testing.T) {
 
 	if response != nil {
 		t.Errorf("expected nil response, got %+v", response)
+	}
+}
+
+func TestGetRegistrationByMeterIDSuccess(t *testing.T) {
+	client := NewClient("http://localhost")
+	poller := NewPoller(client)
+
+	expectedRecord := &RegistrationRecord{
+		ID:             "uuid-1",
+		UserID:         "user-001",
+		RegistrationID: "reg-123",
+		MeterID:        "meter-001",
+		Role:           "PRIMARY_OWNER",
+		ApprovalStatus: "APPROVED",
+	}
+
+	store := &mockStore{
+		getRegister: func(ctx context.Context, meterID string) (*RegistrationRecord, error) {
+			if meterID != "meter-001" {
+				t.Errorf("expected meterID 'meter-001', got %s", meterID)
+			}
+			return expectedRecord, nil
+		},
+	}
+
+	service := NewService(client, poller, store)
+
+	record, err := service.GetByMeterID(context.Background(), "meter-001")
+	if err != nil {
+		fmt.Println(err) // or handle error
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if record == nil || record.MeterID != "meter-001" {
+		t.Errorf("expected meter-001 registration record, got %+v", record)
+	}
+}
+
+func TestGetRegistrationByUserIDSuccess(t *testing.T) {
+	client := NewClient("http://localhost")
+	poller := NewPoller(client)
+
+	expectedRecord := &RegistrationRecord{
+		ID:             "uuid-1",
+		UserID:         "user-001",
+		RegistrationID: "reg-123",
+		MeterID:        "meter-001",
+		Role:           "PRIMARY_OWNER",
+		ApprovalStatus: "DEWA_APPROVAL_PENDING",
+	}
+
+	store := &mockStore{
+		getRegisterByUser: func(ctx context.Context, userReference string) (*RegistrationRecord, error) {
+			if userReference != "user-001" {
+				t.Errorf("expected userReference 'user-001', got %s", userReference)
+			}
+			return expectedRecord, nil
+		},
+	}
+
+	service := NewService(client, poller, store)
+
+	record, err := service.GetRegistrationByUser(context.Background(), "user-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if record == nil || record.UserID != "user-001" {
+		t.Errorf("expected user-001 registration record, got %+v", record)
+	}
+
+	if record.ApprovalStatus != "DEWA_APPROVAL_PENDING" {
+		t.Errorf("expected approval status DEWA_APPROVAL_PENDING, got %s", record.ApprovalStatus)
 	}
 }
