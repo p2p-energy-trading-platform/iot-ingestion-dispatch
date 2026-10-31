@@ -55,31 +55,43 @@ func (m *mockStore) GetRegistrationByUserID(ctx context.Context, userReference s
 func TestRegisterHouseSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("expected POST, got %s", r.Method)
-			}
+			w.Header().Set("Content-Type", "application/json")
 
-			if r.URL.Path != "/api/link-requests" {
-				t.Errorf("unexpected path: %s", r.URL.Path)
-			}
+			if r.Method == http.MethodPost {
+				if r.URL.Path != "/api/link-requests" {
+					t.Errorf("unexpected POST path: %s", r.URL.Path)
+				}
 
-			var request LinkRequest
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("failed to decode request: %v", err)
+				var request LinkRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("failed to decode request: %v", err)
+					return
+				}
+
+				if request.RegistrationID != "reg-123" {
+					t.Errorf("unexpected registration ID: %s", request.RegistrationID)
+				}
+
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(
+					`{"requestId":"server-uuid-123","status":"PENDING","message":"Link request created"}`,
+				))
 				return
 			}
 
-			if request.RegistrationID != "reg-123" {
-				t.Errorf("unexpected registration ID: %s", request.RegistrationID)
+			if r.Method == http.MethodGet {
+				if r.URL.Path != "/api/link-requests/server-uuid-123" {
+					t.Errorf("unexpected GET path: %s", r.URL.Path)
+				}
+
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(
+					`{"registrationId":"reg-123","meterId":"meter-001","status":"APPROVED"}`,
+				))
+				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-
-			// Updated to include requestId matching the modified DEWA mock contract
-			_, _ = w.Write([]byte(
-				`{"requestId":"server-uuid-123","status":"PENDING","message":"Link request created"}`,
-			))
+			t.Errorf("unexpected method: %s", r.Method)
 		},
 	))
 	defer server.Close()
