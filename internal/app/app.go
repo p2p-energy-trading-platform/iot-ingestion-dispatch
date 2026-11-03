@@ -10,6 +10,7 @@ import (
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/ingestion"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/observability"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/query"
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
 	postgresstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
 	redisstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/redis"
 	grpctransport "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/transport/grpc"
@@ -177,11 +178,16 @@ func New(
 		return nil, fmt.Errorf("kafka: %w", err)
 	}
 
+	dewaClient := registration.NewClient(config.ExternalUtility.BaseUrl)
+	regPoller := registration.NewPoller(dewaClient)
+	regService := registration.NewService(dewaClient, regPoller, postgres)
+
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,
 		logger,
 		grpctransport.Services{
-			Iot: grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger),
+			Iot:                grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger),
+			DeviceRegistration: grpcservices.NewRegistrationHandler(regService, logger),
 		},
 	)
 
