@@ -3,22 +3,14 @@ package postgres
 import (
 	"context"
 	"fmt"
-)
 
-// MeterRegistration represents a smart meter registration record.
-type MeterRegistration struct {
-	ID             string
-	UserID         string
-	RegistrationID string
-	MeterID        string
-	Role           string
-	ApprovalStatus string
-}
+	regdomain "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
+)
 
 // SaveMeterRegistration saves a meter registration in PostgreSQL.
 func (s *Store) SaveMeterRegistration(
 	ctx context.Context,
-	registration MeterRegistration,
+	registration regdomain.RegistrationRecord,
 ) error {
 	const query = `
 		INSERT INTO iot_data.meter_registrations (
@@ -60,17 +52,17 @@ func (s *Store) SaveMeterRegistration(
 	return nil
 }
 
-func (s *Store) GetByRegistrationByID(
+func (s *Store) GetByRegistrationID(
 	ctx context.Context,
 	registrationID string,
-) (*MeterRegistration, error) {
+) (*regdomain.RegistrationRecord, error) {
 	const query = `
 		SELECT id, user_id, meter_id, registration_id, role, approval_status
 		FROM iot_data.meter_registrations
 		WHERE registration_id = $1
 	`
 
-	var reg MeterRegistration
+	var reg regdomain.RegistrationRecord
 	err := s.pool.QueryRow(ctx, query, registrationID).Scan(
 		&reg.ID,
 		&reg.UserID,
@@ -90,14 +82,14 @@ func (s *Store) GetByRegistrationByID(
 func (s *Store) GetRegistrationByMeterID(
 	ctx context.Context,
 	meterID string,
-) (*MeterRegistration, error) {
+) (*regdomain.RegistrationRecord, error) {
 	const query = `
         SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
         WHERE meter_id = $1
     `
 
-	var reg MeterRegistration
+	var reg regdomain.RegistrationRecord
 	err := s.pool.QueryRow(ctx, query, meterID).Scan(
 		&reg.ID,
 		&reg.UserID,
@@ -117,7 +109,7 @@ func (s *Store) GetRegistrationByMeterID(
 func (s *Store) GetRegistrationByUserID(
 	ctx context.Context,
 	userID string,
-) (*MeterRegistration, error) {
+) (*regdomain.RegistrationRecord, error) {
 	const query = `
         SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
@@ -125,7 +117,7 @@ func (s *Store) GetRegistrationByUserID(
         LIMIT 1
     `
 
-	var reg MeterRegistration
+	var reg regdomain.RegistrationRecord
 	err := s.pool.QueryRow(ctx, query, userID).Scan(
 		&reg.ID,
 		&reg.UserID,
