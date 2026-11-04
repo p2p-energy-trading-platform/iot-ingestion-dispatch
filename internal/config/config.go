@@ -78,10 +78,11 @@ func (s ServiceConfig) IsProduction() bool {
 }
 
 type KafkaConfig struct {
-	Brokers        []string
-	ConsumerGroup  string
-	MeterTopic     string
-	HeartbeatTopic string
+	Brokers                []string
+	ConsumerGroup          string
+	MeterTopic             string
+	HeartbeatTopic         string
+	ActuationResponseTopic string
 
 	TLS         bool
 	SASLUser    string
@@ -174,18 +175,19 @@ func Load() (*Config, error) {
 			ShutdownTimeout: r.duration("SHUTDOWN_TIMEOUT", 30*time.Second),
 		},
 		Kafka: KafkaConfig{
-			Brokers:           splitList(env("KAFKA_BROKER", "localhost:9092")),
-			ConsumerGroup:     env("KAFKA_CONSUMER_GROUP", "iot-ingestion"),
-			MeterTopic:        env("KAFKA_METER_TOPIC", "iot.meter-readings"),
-			HeartbeatTopic:    env("KAFKA_HEARTBEAT_TOPIC", "iot.heartbeats"),
-			TLS:               r.boolean("KAFKA_TLS", false),
-			SASLUser:          os.Getenv("KAFKA_SASL_USER"),
-			SASLPass:          os.Getenv("KAFKA_SASL_PASSWORD"),
-			SASLMech:          strings.ToUpper(os.Getenv("KAFKA_SASL_MECHANISM")),
-			SessionTime:       r.duration("KAFKA_SESSION_TIMEOUT", 45*time.Second),
-			Heartbeat:         r.duration("KAFKA_HEARTBEAT_INTERVAL", 3*time.Second),
-			FetchMaxBytes:     r.int32("KAFKA_FETCH_MAX_BYTES", 0),
-			MaxPartitionBytes: r.int32("KAFKA_MAX_PARTITION_FETCH_BYTES", 0),
+			Brokers:                splitList(env("KAFKA_BROKER", "localhost:9092")),
+			ConsumerGroup:          env("KAFKA_CONSUMER_GROUP", "iot-ingestion"),
+			MeterTopic:             env("KAFKA_METER_TOPIC", "iot.meter-readings"),
+			HeartbeatTopic:         env("KAFKA_HEARTBEAT_TOPIC", "iot.heartbeats"),
+			ActuationResponseTopic: env("KAFKA_ACTUATION_RESPONSE_TOPIC", "iot.actuation.response"),
+			TLS:                    r.boolean("KAFKA_TLS", false),
+			SASLUser:               os.Getenv("KAFKA_SASL_USER"),
+			SASLPass:               os.Getenv("KAFKA_SASL_PASSWORD"),
+			SASLMech:               strings.ToUpper(os.Getenv("KAFKA_SASL_MECHANISM")),
+			SessionTime:            r.duration("KAFKA_SESSION_TIMEOUT", 45*time.Second),
+			Heartbeat:              r.duration("KAFKA_HEARTBEAT_INTERVAL", 3*time.Second),
+			FetchMaxBytes:          r.int32("KAFKA_FETCH_MAX_BYTES", 0),
+			MaxPartitionBytes:      r.int32("KAFKA_MAX_PARTITION_FETCH_BYTES", 0),
 		},
 		Postgres: PostgresConfig{
 			URL:               os.Getenv("POSTGRES_URL"),

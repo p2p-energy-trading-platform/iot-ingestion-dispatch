@@ -3,7 +3,9 @@ package registration
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 )
 
 type RegistrationRecord struct {
@@ -23,19 +25,27 @@ type RegistrationStore interface {
 	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
 }
 
+type ActuationDispatcher interface {
+	SendActivateMeter(ctx context.Context, meterID string) error
+}
+
 // Service coordinates house registration with the DEWA API.
 type Service struct {
-	client *Client
-	poller *Poller
-	store  RegistrationStore
+	client     *Client
+	poller     *Poller
+	store      RegistrationStore
+	dispatcher ActuationDispatcher
+	logger     *slog.Logger
 }
 
 // NewService creates a registration service.
-func NewService(client *Client, poller *Poller, store RegistrationStore) *Service {
+func NewService(client *Client, poller *Poller, store RegistrationStore, dispatcher ActuationDispatcher, logger *slog.Logger) *Service {
 	return &Service{
-		client: client,
-		poller: poller,
-		store:  store,
+		client:     client,
+		poller:     poller,
+		store:      store,
+		dispatcher: dispatcher,
+		logger:     logger,
 	}
 }
 
@@ -77,13 +87,17 @@ func (s *Service) RegisterHouse(
 	}
 
 	if response.RequestID != "" && s.poller != nil {
-		go s.runPollLoop(context.Background(), response.RequestID, request.RegistrationID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		go func() {
+			defer cancel()
+			s.runPollLoop(ctx, response.RequestID, request.RegistrationID, s.dispatcher)
+		}()
 	}
 
 	return response, nil
 }
 
-func (s *Service) runPollLoop(ctx context.Context, serverRequestID string, registrationID string) {
+func (s *Service) runPollLoop(ctx context.Context, serverRequestID string, registrationID string, dispatcher ActuationDispatcher) {
 	if s.poller == nil || s.store == nil {
 		return
 	}
@@ -94,14 +108,31 @@ func (s *Service) runPollLoop(ctx context.Context, serverRequestID string, regis
 	if err != nil {
 		if strings.Contains(err.Error(), "timed out") {
 			newStatus = "EXPIRED"
-		} else {
-			newStatus = "REJECTED"
 		}
 	} else if finalResp != nil {
 		newStatus = strings.ToUpper(strings.TrimSpace(finalResp.Status))
 	}
 
-	_ = s.store.UpdateMeterRegistrationStatus(ctx, registrationID, newStatus)
+	if updateErr := s.store.UpdateMeterRegistrationStatus(ctx, registrationID, newStatus); updateErr != nil {
+		s.logger.Error("Failed to update smart meter registration status", "err", updateErr)
+		return
+	}
+
+	if newStatus != "APPROVED" || s.dispatcher == nil {
+		s.logger.Info("Meter was not approved")
+		return
+	}
+
+	record, err := s.store.GetByRegistrationID(ctx, registrationID)
+	if err != nil || record == nil {
+		s.logger.Error("The record does not exist", "error", err)
+		return
+	}
+
+	if pubErr := s.dispatcher.SendActivateMeter(ctx, record.MeterID); pubErr != nil {
+		s.logger.Error("Failed to publish smart meter registration claim with iot device", "err", pubErr)
+		return
+	}
 }
 
 func (s *Service) ReverifyRegistration(
@@ -136,7 +167,11 @@ func (s *Service) ReverifyRegistration(
 		})
 
 		if resp.RequestID != "" && s.poller != nil {
-			go s.runPollLoop(context.Background(), resp.RequestID, registrationID)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			go func() {
+				defer cancel()
+				go s.runPollLoop(ctx, resp.RequestID, registrationID, s.dispatcher)
+			}()
 		}
 
 		return resp, nil
@@ -155,7 +190,11 @@ func (s *Service) ReverifyRegistration(
 
 	_ = s.store.UpdateMeterRegistrationStatus(ctx, registrationID, "DEWA_APPROVAL_PENDING")
 	if resp.RequestID != "" && s.poller != nil {
-		go s.runPollLoop(context.Background(), resp.RequestID, registrationID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		go func() {
+			defer cancel()
+			go s.runPollLoop(ctx, resp.RequestID, registrationID, s.dispatcher)
+		}()
 	}
 
 	return resp, nil
