@@ -21,7 +21,7 @@ func NewKafkaActuationProducer(brokers []string, topic string, extraOpts ...kgo.
 
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create kafka producer client: %w", err)
+		return nil, fmt.Errorf("failed to create kafka producer client: %w", err)
 	}
 
 	return &KafkaActuationProducer{
