@@ -78,6 +78,9 @@ func (app *App) shutdown() error {
 		errs = append(errs, fmt.Errorf("close redis: %w", err))
 	}
 
+	app.logger.Info("Closing actuation producer")
+	app.producer.Close()
+
 	app.logger.Info("Closing postgres")
 	app.postgres.Close()
 

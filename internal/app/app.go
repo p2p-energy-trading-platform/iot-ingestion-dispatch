@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/actuation"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/admission"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/config"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/ingestion"
@@ -26,6 +27,7 @@ type App struct {
 	consumer     *ingestion.Consumer
 	consumerDone chan struct{}
 	router       *ingestion.Router
+	producer     *actuation.KafkaActuationProducer
 	grpc         *grpctransport.Server
 	health       *httphealth.Server
 	metrics      *observability.Metrics
@@ -139,6 +141,10 @@ func New(
 			WithInputLimits(limits).
 			WithCachePolicy(cachePolicy, config.Kafka.HeartbeatTopic, metrics),
 	)
+	router.Register(
+		config.Kafka.ActuationResponseTopic,
+		ingestion.NewActuationHandler(logger),
+	)
 
 	securityOpts, err := kafkaSecurityOpts(config.Kafka)
 	if err != nil {
@@ -150,10 +156,11 @@ func New(
 
 	consumer, err := ingestion.NewConsumer(
 		ingestion.Config{
-			Brokers:        config.Kafka.Brokers,
-			ConsumerGroup:  config.Kafka.ConsumerGroup,
-			MeterTopic:     config.Kafka.MeterTopic,
-			HeartbeatTopic: config.Kafka.HeartbeatTopic,
+			Brokers:                config.Kafka.Brokers,
+			ConsumerGroup:          config.Kafka.ConsumerGroup,
+			MeterTopic:             config.Kafka.MeterTopic,
+			HeartbeatTopic:         config.Kafka.HeartbeatTopic,
+			ActuationResponseTopic: config.Kafka.ActuationResponseTopic,
 			Retry: ingestion.RetryPolicy{
 				MaxTries:        config.Retry.MaxTries,
 				InitialInterval: config.Retry.InitialInterval,
@@ -178,9 +185,21 @@ func New(
 		return nil, fmt.Errorf("kafka: %w", err)
 	}
 
+	actuationProducer, err := actuation.NewKafkaActuationProducer(
+		config.Kafka.Brokers,
+		"iot.actuation.commands",
+		securityOpts...,
+	)
+	if err != nil {
+		_ = redis.Close()
+		postgres.Close()
+		_ = stopTracing(context)
+		return nil, fmt.Errorf("actuation kafka producer: %w", err)
+	}
+
 	dewaClient := registration.NewClient(config.ExternalUtility.BaseUrl)
 	regPoller := registration.NewPoller(dewaClient)
-	regService := registration.NewService(dewaClient, regPoller, postgres)
+	regService := registration.NewService(dewaClient, regPoller, postgres, actuationProducer, logger)
 
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,
@@ -201,6 +220,7 @@ func New(
 		postgres:    postgres,
 		redis:       redis,
 		consumer:    consumer,
+		producer:    actuationProducer,
 		router:      router,
 		grpc:        grpcServer,
 		health:      healthServer,
