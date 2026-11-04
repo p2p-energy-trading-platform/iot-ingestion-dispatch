@@ -21,10 +21,11 @@ const (
 var ErrConsumerClosed = errors.New("ingestion: consumer closed")
 
 type Config struct {
-	Brokers        []string
-	ConsumerGroup  string
-	MeterTopic     string
-	HeartbeatTopic string
+	Brokers                []string
+	ConsumerGroup          string
+	MeterTopic             string
+	HeartbeatTopic         string
+	ActuationResponseTopic string
 
 	// MaxConcurrentHandlers bounds how many partition workers may run a
 	// handler at the same time, across all partitions. Zero uses the default.
@@ -141,7 +142,7 @@ func NewConsumer(config Config, router *Router, recorder FailureRecorder, logger
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(config.Brokers...),
 		kgo.ConsumerGroup(config.ConsumerGroup),
-		kgo.ConsumeTopics(config.MeterTopic, config.HeartbeatTopic),
+		kgo.ConsumeTopics(config.MeterTopic, config.HeartbeatTopic, config.ActuationResponseTopic),
 		kgo.DisableAutoCommit(),
 		// Rebalances wait until AllowRebalance, so a revoke can never run
 		// while Run is mid-dispatch. CloseAllowingRebalance in Close is the
