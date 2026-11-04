@@ -99,7 +99,8 @@ func eventually(t *testing.T, what string, timeout time.Duration, cond func() bo
 func TestConsumerEndToEndWithRestart(t *testing.T) {
 	e := newEnv(t)
 	broker := newKafka(t)
-	createTopics(t, broker, 2, meterTopic, heartbeatTopic)
+	actuationResponseTopic := "iot.actuation-responses"
+	createTopics(t, broker, 2, meterTopic, heartbeatTopic, actuationResponseTopic)
 	ctx := context.Background()
 
 	meterH := &countingHandler{inner: ingestion.NewMeterHandler(mustRegistry(t, e.pg), e.pg, e.rd, quietLogger())}
@@ -112,6 +113,7 @@ func TestConsumerEndToEndWithRestart(t *testing.T) {
 		c, err := ingestion.NewConsumer(ingestion.Config{
 			Brokers: []string{broker}, ConsumerGroup: "it-" + t.Name(),
 			MeterTopic: meterTopic, HeartbeatTopic: heartbeatTopic,
+			ActuationResponseTopic: actuationResponseTopic,
 		}, router, e.pg, quietLogger())
 		if err != nil {
 			t.Fatal(err)
