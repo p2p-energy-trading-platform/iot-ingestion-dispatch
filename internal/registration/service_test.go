@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +16,17 @@ type mockStore struct {
 	updateFunc        func(ctx context.Context, registrationID string, status string) error
 	getRegister       func(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	getRegisterByUser func(ctx context.Context, userReference string) (*RegistrationRecord, error)
+}
+
+type mockActuationProducer struct {
+	sendFunc func(ctx context.Context, meterID string) error
+}
+
+func (m *mockActuationProducer) SendActivateMeter(ctx context.Context, meterID string) error {
+	if m.sendFunc != nil {
+		return m.sendFunc(ctx, meterID)
+	}
+	return nil
 }
 
 func (m *mockStore) SaveMeterRegistration(ctx context.Context, reg RegistrationRecord) error {
@@ -107,7 +119,16 @@ func TestRegisterHouseSuccess(t *testing.T) {
 		},
 	}
 
-	service := NewService(client, poller, store)
+	producer := &mockActuationProducer{
+		sendFunc: func(ctx context.Context, meterID string) error {
+			if meterID != "meter-001" {
+				t.Errorf("expected meterID 'meter-001', got %s", meterID)
+			}
+			return nil
+		},
+	}
+
+	service := NewService(client, poller, store, producer, slog.Default())
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -136,7 +157,8 @@ func TestRegisterHouseSuccess(t *testing.T) {
 func TestRegisterHouseMissingRegistrationID(t *testing.T) {
 	client := NewClient("http://localhost")
 	store := &mockStore{}
-	service := NewService(client, nil, store)
+	producer := &mockActuationProducer{}
+	service := NewService(client, nil, store, producer, slog.Default())
 
 	request := LinkRequest{
 		MeterID:       "meter-001",
@@ -157,7 +179,8 @@ func TestRegisterHouseMissingRegistrationID(t *testing.T) {
 func TestRegisterHouseMissingMeterID(t *testing.T) {
 	client := NewClient("http://localhost")
 	store := &mockStore{}
-	service := NewService(client, nil, store)
+	producer := &mockActuationProducer{}
+	service := NewService(client, nil, store, producer, slog.Default())
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -178,7 +201,8 @@ func TestRegisterHouseMissingMeterID(t *testing.T) {
 func TestRegisterHouseMissingUserReference(t *testing.T) {
 	client := NewClient("http://localhost")
 	store := &mockStore{}
-	service := NewService(client, nil, store)
+	producer := &mockActuationProducer{}
+	service := NewService(client, nil, store, producer, slog.Default())
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -198,7 +222,7 @@ func TestRegisterHouseMissingUserReference(t *testing.T) {
 
 func TestRegisterHouseNilClientOrStore(t *testing.T) {
 	// Testing with nil client/store configuration
-	service := NewService(nil, nil, nil)
+	service := NewService(nil, nil, nil, nil, slog.Default())
 
 	request := LinkRequest{
 		RegistrationID: "reg-123",
@@ -239,7 +263,9 @@ func TestGetRegistrationByMeterIDSuccess(t *testing.T) {
 		},
 	}
 
-	service := NewService(client, poller, store)
+	producer := &mockActuationProducer{}
+
+	service := NewService(client, poller, store, producer, slog.Default())
 
 	record, err := service.GetByMeterID(context.Background(), "meter-001")
 	if err != nil {
@@ -275,8 +301,9 @@ func TestGetRegistrationByUserIDSuccess(t *testing.T) {
 			return expectedRecord, nil
 		},
 	}
+	producer := &mockActuationProducer{}
 
-	service := NewService(client, poller, store)
+	service := NewService(client, poller, store, producer, slog.Default())
 
 	record, err := service.GetRegistrationByUser(context.Background(), "user-001")
 	if err != nil {
