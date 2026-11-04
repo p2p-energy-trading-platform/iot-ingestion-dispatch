@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 )
 
 type RegistrationRecord struct {
@@ -86,7 +87,11 @@ func (s *Service) RegisterHouse(
 	}
 
 	if response.RequestID != "" && s.poller != nil {
-		go s.runPollLoop(context.Background(), response.RequestID, request.RegistrationID, s.dispatcher)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		go func() {
+			defer cancel()
+			s.runPollLoop(ctx, response.RequestID, request.RegistrationID, s.dispatcher)
+		}()
 	}
 
 	return response, nil
@@ -162,7 +167,11 @@ func (s *Service) ReverifyRegistration(
 		})
 
 		if resp.RequestID != "" && s.poller != nil {
-			go s.runPollLoop(context.Background(), resp.RequestID, registrationID, s.dispatcher)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			go func() {
+				defer cancel()
+				go s.runPollLoop(ctx, resp.RequestID, registrationID, s.dispatcher)
+			}()
 		}
 
 		return resp, nil
@@ -181,7 +190,11 @@ func (s *Service) ReverifyRegistration(
 
 	_ = s.store.UpdateMeterRegistrationStatus(ctx, registrationID, "DEWA_APPROVAL_PENDING")
 	if resp.RequestID != "" && s.poller != nil {
-		go s.runPollLoop(context.Background(), resp.RequestID, registrationID, s.dispatcher)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		go func() {
+			defer cancel()
+			go s.runPollLoop(ctx, resp.RequestID, registrationID, s.dispatcher)
+		}()
 	}
 
 	return resp, nil
