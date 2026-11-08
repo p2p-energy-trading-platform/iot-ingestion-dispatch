@@ -60,6 +60,8 @@ func (s *Store) GetByRegistrationID(
 		SELECT id, user_id, meter_id, registration_id, role, approval_status
 		FROM iot_data.meter_registrations
 		WHERE registration_id = $1
+		ORDER BY created_at DESC
+        LIMIT 1
 	`
 
 	var reg regdomain.RegistrationRecord
@@ -87,6 +89,8 @@ func (s *Store) GetRegistrationByMeterID(
         SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
         WHERE meter_id = $1
+		ORDER BY created_at DESC
+        LIMIT 1
     `
 
 	var reg regdomain.RegistrationRecord
@@ -114,6 +118,7 @@ func (s *Store) GetRegistrationByUserID(
         SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
         WHERE user_id = $1
+		ORDER BY created_at DESC
         LIMIT 1
     `
 
