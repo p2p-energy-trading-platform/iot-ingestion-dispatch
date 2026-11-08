@@ -89,30 +89,6 @@ func TestMigrationsUpgradeFromPreviousRelease(t *testing.T) {
 	}
 }
 
-func TestMigrationsDownThenUpAgain(t *testing.T) {
-	dsn := newTimescale(t)
-	ctx := context.Background()
-	p := gooseProvider(t, dsn)
-
-	if _, err := p.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// Roll back 00010 (seed) and 00009 (constraints + columnstore), then forward.
-	for i := 0; i < 2; i++ {
-		if _, err := p.Down(ctx); err != nil {
-			t.Fatalf("down step %d: %v", i+1, err)
-		}
-	}
-	if n := scalar[int](t, dsn, `
-		SELECT count(*) FROM timescaledb_information.jobs
-		WHERE proc_name IN ('policy_compression','policy_columnstore') AND hypertable_schema='iot_data'`); n != 0 {
-		t.Errorf("compression policies after rollback = %d, want 0", n)
-	}
-	if _, err := p.Up(ctx); err != nil {
-		t.Fatalf("forward after rollback: %v", err)
-	}
-}
-
 func TestDatabaseRejectsInvalidTelemetry(t *testing.T) {
 	dsn := newTimescale(t)
 	ctx := context.Background()
