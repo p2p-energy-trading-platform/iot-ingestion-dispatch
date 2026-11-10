@@ -40,19 +40,12 @@ RUN CGO_ENABLED=0 GOOS=linux \
     -o /out/failure-replay \
     ./cmd/failure-replay
 
-RUN CGO_ENABLED=0 GOOS=linux \
-    go build \
-    -trimpath \
-    -o /out/register-houses \
-    ./cmd/register-houses
-
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /out/iot-ingestion /iot-ingestion
 COPY --from=builder /out/migrate /migrate
 COPY --from=builder /out/redis-rebuild /redis-rebuild
 COPY --from=builder /out/failure-replay /failure-replay
-COPY --from=builder /out/register-houses /register-houses
 
 EXPOSE 50051
 EXPOSE 8080
