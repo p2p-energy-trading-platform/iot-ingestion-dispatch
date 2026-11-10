@@ -143,7 +143,7 @@ func New(
 	)
 	router.Register(
 		config.Kafka.ActuationResponseTopic,
-		ingestion.NewActuationHandler(logger),
+		ingestion.NewActuationHandler(postgres, logger),
 	)
 
 	securityOpts, err := kafkaSecurityOpts(config.Kafka)
