@@ -22,7 +22,7 @@ type MeterRegisteredPayload struct {
 }
 
 type HouseRegistrar interface {
-	RegisterHouse(ctx context.Context, houseID, gridID, meterID string, deviceClass domain.DeviceClass, ratedSolarKw *float64) (string, error)
+	RegisterHouse(ctx context.Context, reg domain.HouseRegistration) (string, error)
 }
 
 type ActuationHandler struct {
@@ -32,8 +32,9 @@ type ActuationHandler struct {
 
 var _ RecordHandler = (*ActuationHandler)(nil)
 
-func NewActuationHandler(logger *slog.Logger) *ActuationHandler {
+func NewActuationHandler(store HouseRegistrar, logger *slog.Logger) *ActuationHandler {
 	return &ActuationHandler{
+		store:  store,
 		logger: logger,
 	}
 }
@@ -46,6 +47,7 @@ func (h *ActuationHandler) HandleRecord(ctx context.Context, key, value []byte) 
 
 	if payload.EventType != "METER_REGISTERED" {
 		h.logger.Debug("Skipping unhandled event type", "event_type", payload.EventType)
+		return nil
 	}
 
 	h.logger.Info("Received METER_REGISTERED event from simulation",
@@ -58,11 +60,13 @@ func (h *ActuationHandler) HandleRecord(ctx context.Context, key, value []byte) 
 
 	outcome, err := h.store.RegisterHouse(
 		ctx,
-		payload.Data.HouseID,
-		payload.Data.GridID,
-		payload.Data.MeterID,
-		domain.DeviceClass(payload.Data.DeviceClass),
-		&solar,
+		domain.HouseRegistration{
+			HouseID:      payload.Data.HouseID,
+			GridID:       payload.Data.GridID,
+			MeterID:      payload.Data.MeterID,
+			DeviceClass:  domain.DeviceClass(payload.Data.DeviceClass),
+			RatedSolarKw: &solar,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to register house %q from simulation response: %w", payload.Data.HouseID, err)

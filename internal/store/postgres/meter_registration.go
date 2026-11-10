@@ -2,8 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 	regdomain "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
 )
 
@@ -46,6 +50,10 @@ func (s *Store) SaveMeterRegistration(
 		status,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return fmt.Errorf("%w: meter %q is already registered to another owner", domain.ErrHouseIdentity, registration.MeterID)
+		}
 		return fmt.Errorf("save meter registration: %w", err)
 	}
 
