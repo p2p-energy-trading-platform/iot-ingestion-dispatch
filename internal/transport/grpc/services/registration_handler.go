@@ -25,6 +25,10 @@ func NewRegistrationHandler(
 	registrationService *registration.Service,
 	logger *slog.Logger,
 ) *RegistrationHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	return &RegistrationHandler{
 		registrationService: registrationService,
 		logger:              logger,
@@ -96,11 +100,10 @@ func (h *RegistrationHandler) ValidateDeviceAssociation(
 	record, err := h.registrationService.GetByMeterID(ctx, meterID)
 
 	if err != nil {
-		// If not found, it means the device is not registered yet
-		return &iotv1.ValidateDeviceAssociationResponse{
-			IsRegistered:  false,
-			PrimaryUserId: "",
-		}, nil
+		if errors.Is(err, domain.ErrNotFound) {
+			return &iotv1.ValidateDeviceAssociationResponse{}, nil
+		}
+		return nil, h.fail(ctx, "ValidateDeviceAssociation", err)
 	}
 
 	if strings.ToUpper(strings.TrimSpace(record.ApprovalStatus)) != "APPROVED" {
@@ -126,10 +129,14 @@ func (h *RegistrationHandler) ReverifyRegistration(
 
 	if meterID == "" {
 		record, err := h.registrationService.GetRegistration(ctx, registrationID)
-		if err != nil {
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return nil, h.fail(ctx, "ReverifyRegistration", err)
+		}
+		if record != nil {
+			meterID = record.MeterID
+		} else {
 			return nil, h.fail(ctx, "ReverifyRegistration", domain.NewValidationError("meter_id", "is required for reverification"))
 		}
-		meterID = record.MeterID
 	}
 
 	resp, err := h.registrationService.ReverifyRegistration(
@@ -162,12 +169,10 @@ func (h *RegistrationHandler) GetRegistrationByUser(
 
 	record, err := h.registrationService.GetRegistrationByUser(ctx, userRef)
 	if err != nil {
-		return &iotv1.GetRegistrationByUserResponse{
-			HasMeter:       false,
-			RegistrationId: "",
-			MeterId:        "",
-			ApprovalStatus: "",
-		}, nil
+		if errors.Is(err, domain.ErrNotFound) {
+			return &iotv1.GetRegistrationByUserResponse{}, nil
+		}
+		return nil, h.fail(ctx, "GetRegistrationByUser", err)
 	}
 
 	return &iotv1.GetRegistrationByUserResponse{
