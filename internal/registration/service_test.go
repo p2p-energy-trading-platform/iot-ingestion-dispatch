@@ -14,6 +14,7 @@ type mockStore struct {
 	saveFunc          func(ctx context.Context, reg RegistrationRecord) error
 	getFunc           func(ctx context.Context, registrationID string) (*RegistrationRecord, error)
 	updateFunc        func(ctx context.Context, registrationID string, status string) error
+	updateRequestFunc func(ctx context.Context, registrationID string, requestID string) error
 	getRegister       func(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	getRegisterByUser func(ctx context.Context, userReference string) (*RegistrationRecord, error)
 }
@@ -46,6 +47,13 @@ func (m *mockStore) GetByRegistrationID(ctx context.Context, registrationID stri
 func (m *mockStore) UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error {
 	if m.updateFunc != nil {
 		return m.updateFunc(ctx, registrationID, status)
+	}
+	return nil
+}
+
+func (m *mockStore) UpdateMeterRegistrationRequestID(ctx context.Context, registrationID string, requestID string) error {
+	if m.updateRequestFunc != nil {
+		return m.updateRequestFunc(ctx, registrationID, requestID)
 	}
 	return nil
 }
@@ -110,8 +118,16 @@ func TestRegisterHouseSuccess(t *testing.T) {
 
 	client := NewClient(server.URL)
 	poller := NewPoller(client)
+	var savedRequestID string
 	store := &mockStore{
 		saveFunc: func(ctx context.Context, reg RegistrationRecord) error {
+			return nil
+		},
+		updateRequestFunc: func(ctx context.Context, registrationID, requestID string) error {
+			if registrationID != "reg-123" {
+				t.Errorf("unexpected registration ID for DEWA request ID: %s", registrationID)
+			}
+			savedRequestID = requestID
 			return nil
 		},
 		updateFunc: func(ctx context.Context, registrationID string, status string) error {
@@ -151,6 +167,94 @@ func TestRegisterHouseSuccess(t *testing.T) {
 
 	if response.RequestID != "server-uuid-123" {
 		t.Errorf("expected requestId 'server-uuid-123', got %s", response.RequestID)
+	}
+	if savedRequestID != response.RequestID {
+		t.Errorf("expected persisted requestId %q, got %q", response.RequestID, savedRequestID)
+	}
+}
+
+func TestReverifyRegistrationResumesExistingRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected DEWA request during reverification: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	store := &mockStore{
+		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+			return &RegistrationRecord{
+				UserID:         "user-001",
+				MeterID:        "meter-001",
+				RegistrationID: "reg-123",
+				RequestID:      "server-req-123",
+				ApprovalStatus: "EXPIRED",
+			}, nil
+		},
+		updateFunc: func(_ context.Context, registrationID, status string) error {
+			if registrationID != "reg-123" || status != "DEWA_APPROVAL_PENDING" {
+				t.Errorf("unexpected reverification state update: %s %s", registrationID, status)
+			}
+			return nil
+		},
+	}
+	service := NewService(NewClient(server.URL), nil, store, nil, slog.Default())
+
+	response, err := service.ReverifyRegistration(
+		context.Background(),
+		"reg-123",
+		"user-001",
+		"meter-001",
+	)
+	if err != nil {
+		t.Fatalf("ReverifyRegistration returned an error: %v", err)
+	}
+	if response.RequestID != "server-req-123" {
+		t.Errorf("expected existing request ID, got %q", response.RequestID)
+	}
+	if response.Status != "DEWA_APPROVAL_PENDING" {
+		t.Errorf("expected status DEWA_APPROVAL_PENDING, got %q", response.Status)
+	}
+}
+
+func TestReverifyRegistrationCreatesMissingRequestAndPersistsID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/link-requests" {
+			t.Errorf("unexpected DEWA request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"requestId":"server-req-456","status":"PENDING","message":"created"}`))
+	}))
+	defer server.Close()
+
+	var savedRegistration RegistrationRecord
+	var savedRequestID string
+	store := &mockStore{
+		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+			return nil, nil
+		},
+		saveFunc: func(_ context.Context, record RegistrationRecord) error {
+			savedRegistration = record
+			return nil
+		},
+		updateRequestFunc: func(_ context.Context, _, requestID string) error {
+			savedRequestID = requestID
+			return nil
+		},
+	}
+	service := NewService(NewClient(server.URL), nil, store, nil, slog.Default())
+
+	response, err := service.ReverifyRegistration(
+		context.Background(),
+		"reg-456",
+		"user-001",
+		"meter-002",
+	)
+	if err != nil {
+		t.Fatalf("ReverifyRegistration returned an error: %v", err)
+	}
+	if savedRegistration.Role != "PRIMARY_OWNER" || savedRegistration.ApprovalStatus != "DEWA_APPROVAL_PENDING" {
+		t.Errorf("unexpected initial registration: %+v", savedRegistration)
+	}
+	if savedRequestID != "server-req-456" || response.RequestID != savedRequestID {
+		t.Errorf("expected request ID to be persisted, got persisted=%q response=%q", savedRequestID, response.RequestID)
 	}
 }
 
