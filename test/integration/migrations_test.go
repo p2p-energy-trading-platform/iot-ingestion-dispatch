@@ -26,10 +26,19 @@ func TestMigrationsCleanInstall(t *testing.T) {
 	}
 
 	for _, table := range []string{"grids", "houses", "flexible_assets", "discovered_assets",
-		"meter_readings", "storage_asset_readings", "ingestion_failures"} {
+		"meter_readings", "storage_asset_readings", "ingestion_failures", "meter_registrations"} {
 		if scalar[bool](t, dsn, `SELECT to_regclass('iot_data.`+table+`') IS NOT NULL`) == false {
 			t.Errorf("table iot_data.%s missing after migration", table)
 		}
+	}
+	if !scalar[bool](t, dsn, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'iot_data'
+			  AND table_name = 'meter_registrations'
+			  AND column_name = 'request_id'
+		)`) {
+		t.Error("meter_registrations.request_id missing after migration")
 	}
 
 	if n := scalar[int](t, dsn, `SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='iot_data'`); n != 2 {
