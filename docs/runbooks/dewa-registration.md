@@ -17,7 +17,7 @@ The registration service:
 Create the DEWA client using the configured base URL:
 
 ```go
-client := registration.NewDEWAClient(baseURL)
+client := registration.NewClient(baseURL)
 ```
 
 The base URL must point to the running DEWA Mock API. The client removes trailing slashes and uses a 10-second HTTP timeout.
@@ -46,6 +46,7 @@ Accept: application/json
 
 ```json
 {
+  "requestId": "REQ-123",
   "status": "PENDING",
   "message": "Link request created"
 }
@@ -61,7 +62,7 @@ If the caller does not provide a registration ID, GridX generates a UUID.
 4. The service saves the registration in PostgreSQL with status `DEWA_APPROVAL_PENDING`.
 5. The service sends a POST request to the DEWA Mock API.
 6. The service returns the registration ID and DEWA response status.
-7. A separate polling workflow checks the approval state and updates the local record.
+7. The service polls DEWA and updates the local registration status.
 
 A successful response with status `PENDING` does not mean the meter has been approved.
 
@@ -73,12 +74,14 @@ The registration record is stored in:
 
 Migration file:
 
-`migrations/00011_create_meter_registrations.sql`
+`migrations/00011_create_meter_registrations.sql` and `migrations/0013_add_dewa_request_id.sql`
 
 The table contains:
 - `registration_id`
 - `meter_id`
-- `user_reference`
+- `user_id` (the platform user UUID)
+- `role` (new claims default to `PRIMARY_OWNER`)
+- `request_id` (the DEWA ID used to resume polling)
 - `approval_status`
 - `created_at`
 - `updated_at`
@@ -89,9 +92,9 @@ Supported statuses:
 - `DEWA_APPROVAL_PENDING`
 - `APPROVED`
 - `REJECTED`
-- `TIMED_OUT`
+- `EXPIRED`
 
-Apply the project's database migrations before running the registration service against PostgreSQL.
+Apply the project's database migrations before running the registration service against PostgreSQL. The IoT service stores the user UUID, but does not add a foreign key to a users table owned by another service.
 
 ## 6. Error Handling
 
@@ -110,9 +113,20 @@ The service handles:
 
 The registration is saved before dispatching the request to DEWA. If dispatch fails, the pending record remains in the database for later investigation or reconciliation.
 
-Automatic retries and reconciliation must be implemented separately.
+## 7. Approval polling and reverification
 
-## 7. Local Testing
+After DEWA returns a `requestId`, the service stores it and polls
+`GET /api/link-requests/{requestId}` every four seconds. Polling stops on
+`APPROVED`, `REJECTED`, or after ten minutes; a timeout changes the local
+status to `EXPIRED`. Approval activates the meter for the ingestion flow.
+
+`ReverifyRegistration` resumes polling with the stored DEWA request ID, without
+creating another DEWA request. If the registration or its request ID is absent,
+the service creates a new DEWA link request and stores its ID. Reverification
+can include the user reference and meter ID; supplied values must match the
+stored registration.
+
+## 8. Local Testing
 
 ### Start the DEWA Mock API
 
@@ -144,7 +158,7 @@ The HTTP client tests use Go's `httptest` package to test the request payload, e
 
 The service tests use fake dependencies to test input validation, registration ID generation, pending-status persistence, and dispatch outcomes.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Problem | What to check |
 |---|---|
@@ -152,10 +166,10 @@ The service tests use fake dependencies to test input validation, registration I
 | HTTP error | Check the mock service logs and response status. |
 | Invalid JSON response | Verify the mock API response format. |
 | Database error | Confirm PostgreSQL is running and migrations have been applied. |
-| Registration remains pending | Check DEWA approval state and the separate polling workflow. |
+| Registration remains pending | Check DEWA approval state and the stored DEWA request ID; polling expires after ten minutes. |
 
-## 9. Scope and Limitations
+## 10. Scope and Limitations
 
-This workflow initiates registration; it does not complete the approval process.
-
-Approval polling, state transitions, retry policies, and timeout handling belong to the separate registration polling workflow. These must be implemented before relying on automatic approval updates in production.
+The DEWA mock remains the authority for approval. The service persists each
+registration attempt and its local state; administrative history and cleanup
+policies are separate concerns.
