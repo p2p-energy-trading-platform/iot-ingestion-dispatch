@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
@@ -142,6 +143,40 @@ func (s *Store) GetRegistrationByUserID(
 
 	if err != nil {
 		return nil, fmt.Errorf("get registration by user ID %q: %w", userID, err)
+	}
+
+	return &reg, nil
+}
+
+// GetApprovedRegistrationByUserID returns the account's approved primary-owner
+// registration, or nil when it has none. Pending claims are not ownership.
+func (s *Store) GetApprovedRegistrationByUserID(
+	ctx context.Context,
+	userID string,
+) (*regdomain.RegistrationRecord, error) {
+	const query = `
+		SELECT id, user_id, registration_id, meter_id, role, approval_status
+		FROM iot_data.meter_registrations
+		WHERE user_id = $1
+		  AND role = 'PRIMARY_OWNER'
+		  AND approval_status = 'APPROVED'
+		LIMIT 1
+	`
+
+	var reg regdomain.RegistrationRecord
+	err := s.pool.QueryRow(ctx, query, userID).Scan(
+		&reg.ID,
+		&reg.UserID,
+		&reg.RegistrationID,
+		&reg.MeterID,
+		&reg.Role,
+		&reg.ApprovalStatus,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get approved registration by user ID %q: %w", userID, err)
 	}
 
 	return &reg, nil

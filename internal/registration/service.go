@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
 type RegistrationRecord struct {
@@ -23,6 +25,9 @@ type RegistrationStore interface {
 	UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error
 	GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
+	// GetApprovedRegistrationByUserID returns the account's approved
+	// primary-owner registration, or nil when it has none.
+	GetApprovedRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type ActuationDispatcher interface {
@@ -49,6 +54,21 @@ func NewService(client *Client, poller *Poller, store RegistrationStore, dispatc
 	}
 }
 
+// ensureNoApprovedMeter enforces one smart meter per account: a claim fails
+// with domain.ErrMeterAlreadyRegistered when the account already has an
+// approved primary-owner meter. Pending, rejected and expired claims never
+// block a new claim: a pending claim is not ownership until DEWA approves it.
+func (s *Service) ensureNoApprovedMeter(ctx context.Context, userID string) error {
+	approved, err := s.store.GetApprovedRegistrationByUserID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("check approved meter registration: %w", err)
+	}
+	if approved != nil {
+		return fmt.Errorf("account already has approved meter %q: %w", approved.MeterID, domain.ErrMeterAlreadyRegistered)
+	}
+	return nil
+}
+
 // RegisterHouse submits a link request to DEWA.
 func (s *Service) RegisterHouse(
 	ctx context.Context,
@@ -68,6 +88,10 @@ func (s *Service) RegisterHouse(
 
 	if strings.TrimSpace(request.UserReference) == "" {
 		return nil, fmt.Errorf("user reference is required")
+	}
+
+	if err := s.ensureNoApprovedMeter(ctx, request.UserReference); err != nil {
+		return nil, err
 	}
 
 	record := RegistrationRecord{
@@ -143,6 +167,10 @@ func (s *Service) ReverifyRegistration(
 ) (*LinkResponse, error) {
 	if s.client == nil || s.store == nil {
 		return nil, fmt.Errorf("client or store not configured")
+	}
+
+	if err := s.ensureNoApprovedMeter(ctx, userReference); err != nil {
+		return nil, err
 	}
 
 	_, err := s.store.GetByRegistrationID(ctx, registrationID)

@@ -38,5 +38,9 @@ func ToGRPCError(err error) error {
 		return status.Error(codes.AlreadyExists, err.Error())
 	}
 
+	if errors.Is(err, domain.ErrMeterAlreadyRegistered) {
+		return status.Error(codes.AlreadyExists, "a smart meter is already registered")
+	}
+
 	return status.Error(codes.Internal, "Internal Server Error")
 }
