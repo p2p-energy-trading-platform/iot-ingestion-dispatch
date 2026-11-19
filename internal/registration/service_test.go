@@ -3,11 +3,14 @@ package registration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
 type mockStore struct {
@@ -16,6 +19,7 @@ type mockStore struct {
 	updateFunc        func(ctx context.Context, registrationID string, status string) error
 	getRegister       func(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	getRegisterByUser func(ctx context.Context, userReference string) (*RegistrationRecord, error)
+	getActiveByUser   func(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type mockActuationProducer struct {
@@ -60,6 +64,13 @@ func (m *mockStore) GetRegistrationByMeterID(ctx context.Context, meterID string
 func (m *mockStore) GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error) {
 	if m.getRegisterByUser != nil {
 		return m.getRegisterByUser(ctx, userReference)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) GetActiveRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error) {
+	if m.getActiveByUser != nil {
+		return m.getActiveByUser(ctx, userID)
 	}
 	return nil, nil
 }
@@ -316,5 +327,118 @@ func TestGetRegistrationByUserIDSuccess(t *testing.T) {
 
 	if record.ApprovalStatus != "DEWA_APPROVAL_PENDING" {
 		t.Errorf("expected approval status DEWA_APPROVAL_PENDING, got %s", record.ApprovalStatus)
+	}
+}
+
+// dewaMustNotBeCalled fails the test if the service contacts DEWA.
+func dewaMustNotBeCalled(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("DEWA was called: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func activeRegistration(registrationID string) func(context.Context, string) (*RegistrationRecord, error) {
+	return func(context.Context, string) (*RegistrationRecord, error) {
+		return &RegistrationRecord{
+			RegistrationID: registrationID,
+			MeterID:        "meter-first",
+			UserID:         "user-001",
+			Role:           "PRIMARY_OWNER",
+			ApprovalStatus: "APPROVED",
+		}, nil
+	}
+}
+
+func TestRegisterHouseRefusesAccountThatAlreadyHasAMeter(t *testing.T) {
+	server := dewaMustNotBeCalled(t)
+	client := NewClient(server.URL)
+	store := &mockStore{
+		getActiveByUser: activeRegistration("reg-first"),
+		saveFunc: func(context.Context, RegistrationRecord) error {
+			t.Error("a second registration was saved")
+			return nil
+		},
+	}
+	service := NewService(client, NewPoller(client), store, nil, slog.Default())
+
+	_, err := service.RegisterHouse(context.Background(), LinkRequest{
+		RegistrationID: "reg-second",
+		MeterID:        "meter-second",
+		UserReference:  "user-001",
+	})
+	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
+		t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
+	}
+}
+
+func TestReverifyRefusesNewRegistrationWhenAccountHasAMeter(t *testing.T) {
+	server := dewaMustNotBeCalled(t)
+	client := NewClient(server.URL)
+	store := &mockStore{
+		getActiveByUser: activeRegistration("reg-first"),
+		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+			return nil, fmt.Errorf("not found")
+		},
+		saveFunc: func(context.Context, RegistrationRecord) error {
+			t.Error("a second registration was saved")
+			return nil
+		},
+	}
+	service := NewService(client, NewPoller(client), store, nil, slog.Default())
+
+	_, err := service.ReverifyRegistration(context.Background(), "reg-second", "user-001", "meter-second")
+	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
+		t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
+	}
+}
+
+func TestReverifyRefusesOldRegistrationWhenAccountHasAnotherMeter(t *testing.T) {
+	server := dewaMustNotBeCalled(t)
+	client := NewClient(server.URL)
+	store := &mockStore{
+		getActiveByUser: activeRegistration("reg-first"),
+		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+			return &RegistrationRecord{RegistrationID: "reg-old", MeterID: "meter-old", UserID: "user-001", ApprovalStatus: "REJECTED"}, nil
+		},
+		updateFunc: func(context.Context, string, string) error {
+			t.Error("the old registration was made pending again")
+			return nil
+		},
+	}
+	service := NewService(client, NewPoller(client), store, nil, slog.Default())
+
+	_, err := service.ReverifyRegistration(context.Background(), "reg-old", "user-001", "meter-old")
+	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
+		t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
+	}
+}
+
+func TestReverifyAllowsTheAccountsOwnRegistration(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"status":"PENDING","message":"Link request created"}`))
+	}))
+	defer server.Close()
+	client := NewClient(server.URL)
+	store := &mockStore{
+		getActiveByUser: activeRegistration("reg-first"),
+		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+			return &RegistrationRecord{RegistrationID: "reg-first", MeterID: "meter-first", UserID: "user-001", ApprovalStatus: "DEWA_APPROVAL_PENDING"}, nil
+		},
+	}
+	service := NewService(client, nil, store, nil, slog.Default())
+
+	if _, err := service.ReverifyRegistration(context.Background(), "reg-first", "user-001", "meter-first"); err != nil {
+		t.Fatalf("err = %v, want the account's own registration to be re-verified", err)
+	}
+	if !called {
+		t.Error("DEWA was not asked to re-verify")
 	}
 }

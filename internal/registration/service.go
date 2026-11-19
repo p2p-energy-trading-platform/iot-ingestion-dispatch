@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
 
 type RegistrationRecord struct {
@@ -23,6 +25,9 @@ type RegistrationStore interface {
 	UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error
 	GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
+	// GetActiveRegistrationByUserID returns the account's pending or approved
+	// primary-owner registration, or nil when it has none.
+	GetActiveRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type ActuationDispatcher interface {
@@ -49,6 +54,20 @@ func NewService(client *Client, poller *Poller, store RegistrationStore, dispatc
 	}
 }
 
+// ensureNoOtherMeter enforces one smart meter per account: it fails with
+// domain.ErrMeterAlreadyRegistered when the account already has a pending or
+// approved registration other than registrationID.
+func (s *Service) ensureNoOtherMeter(ctx context.Context, userID, registrationID string) error {
+	active, err := s.store.GetActiveRegistrationByUserID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("check existing meter registration: %w", err)
+	}
+	if active != nil && active.RegistrationID != registrationID {
+		return fmt.Errorf("account already has meter %q: %w", active.MeterID, domain.ErrMeterAlreadyRegistered)
+	}
+	return nil
+}
+
 // RegisterHouse submits a link request to DEWA.
 func (s *Service) RegisterHouse(
 	ctx context.Context,
@@ -68,6 +87,10 @@ func (s *Service) RegisterHouse(
 
 	if strings.TrimSpace(request.UserReference) == "" {
 		return nil, fmt.Errorf("user reference is required")
+	}
+
+	if err := s.ensureNoOtherMeter(ctx, request.UserReference, request.RegistrationID); err != nil {
+		return nil, err
 	}
 
 	record := RegistrationRecord{
@@ -143,6 +166,10 @@ func (s *Service) ReverifyRegistration(
 ) (*LinkResponse, error) {
 	if s.client == nil || s.store == nil {
 		return nil, fmt.Errorf("client or store not configured")
+	}
+
+	if err := s.ensureNoOtherMeter(ctx, userReference, registrationID); err != nil {
+		return nil, err
 	}
 
 	_, err := s.store.GetByRegistrationID(ctx, registrationID)
