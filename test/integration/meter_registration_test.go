@@ -5,18 +5,19 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
-	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
 	postgresstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
 )
 
 // An account has one smart meter; a house is identified by its meter.
-const owner = "44444444-4444-4444-4444-444444444444"
+const (
+	owner   = "44444444-4444-4444-4444-444444444444"
+	someone = "55555555-5555-5555-5555-555555555555"
+)
 
 // newRegistrationEnv migrates a fresh database and opens the Postgres store.
 func newRegistrationEnv(t *testing.T) (*postgresstore.Store, *sql.DB) {
@@ -42,9 +43,9 @@ func seedRegistrations(t *testing.T, db *sql.DB, rows string) {
 	}
 }
 
-func claim(registrationID, meterID string) registration.RegistrationRecord {
+func claim(userID, registrationID, meterID string) registration.RegistrationRecord {
 	return registration.RegistrationRecord{
-		UserID:         owner,
+		UserID:         userID,
 		MeterID:        meterID,
 		RegistrationID: registrationID,
 		Role:           "PRIMARY_OWNER",
@@ -52,72 +53,82 @@ func claim(registrationID, meterID string) registration.RegistrationRecord {
 	}
 }
 
-func TestActiveRegistrationIsThePendingOrApprovedOne(t *testing.T) {
+func approvalStatus(t *testing.T, db *sql.DB, registrationID string) string {
+	t.Helper()
+	var status string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT approval_status FROM iot_data.meter_registrations WHERE registration_id = $1`, registrationID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
+func TestOnlyAnApprovedRegistrationCountsAsTheAccountsMeter(t *testing.T) {
 	pg, db := newRegistrationEnv(t)
 	ctx := context.Background()
 
-	none, err := pg.GetActiveRegistrationByUserID(ctx, owner)
+	seedRegistrations(t, db, `
+		('reg-pending', 'meter-a', '`+owner+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER', now()),
+		('reg-rejected', 'meter-b', '`+owner+`', 'REJECTED', 'PRIMARY_OWNER', now()),
+		('reg-expired', 'meter-c', '`+owner+`', 'EXPIRED', 'PRIMARY_OWNER', now())`)
+	none, err := pg.GetApprovedRegistrationByUserID(ctx, owner)
 	if err != nil || none != nil {
-		t.Fatalf("no registrations: got %+v, %v; want nil, nil", none, err)
+		t.Fatalf("no approved registration: got %+v, %v; want nil, nil", none, err)
 	}
 
-	seedRegistrations(t, db, `
-		('reg-old', 'meter-a', '`+owner+`', 'REJECTED', 'PRIMARY_OWNER', now() - interval '2 days'),
-		('reg-now', 'meter-b', '`+owner+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER', now() - interval '1 day'),
-		('reg-new', 'meter-c', '`+owner+`', 'EXPIRED', 'PRIMARY_OWNER', now())`)
-
-	active, err := pg.GetActiveRegistrationByUserID(ctx, owner)
+	seedRegistrations(t, db, `('reg-approved', 'meter-d', '`+owner+`', 'APPROVED', 'PRIMARY_OWNER', now() - interval '1 day')`)
+	approved, err := pg.GetApprovedRegistrationByUserID(ctx, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active == nil || active.RegistrationID != "reg-now" {
-		t.Fatalf("active = %+v, want the pending reg-now", active)
+	if approved == nil || approved.RegistrationID != "reg-approved" {
+		t.Fatalf("approved = %+v, want reg-approved", approved)
 	}
 }
 
-func TestRegistrationByUserPrefersTheActiveOne(t *testing.T) {
+// A pending claim is not ownership: anyone can type a meter number, and DEWA
+// approval can fail or never happen. Pending claims must not block new ones.
+func TestPendingClaimsDoNotBlockNewClaims(t *testing.T) {
+	pg, db := newRegistrationEnv(t)
+	ctx := context.Background()
+	seedRegistrations(t, db, `
+		('reg-mine', 'meter-a', '`+owner+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER', now()),
+		('reg-theirs', 'meter-b', '`+someone+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER', now())`)
+
+	for _, c := range []registration.RegistrationRecord{
+		claim(owner, "reg-mine-again", "meter-a"),  // same user, same meter, new request
+		claim(owner, "reg-mine-other", "meter-c"),  // same user, another meter
+		claim(owner, "reg-mine-theirs", "meter-b"), // a meter someone else has only claimed
+		claim(someone, "reg-theirs-a", "meter-a"),  // another user, a meter I have only claimed
+	} {
+		if err := pg.SaveMeterRegistration(ctx, c); err != nil {
+			t.Errorf("claim %s for %s: err = %v, want it saved", c.RegistrationID, c.MeterID, err)
+		}
+	}
+}
+
+func TestAccountCannotHaveTwoApprovedMeters(t *testing.T) {
 	pg, db := newRegistrationEnv(t)
 	seedRegistrations(t, db, `
-		('reg-approved', 'meter-a', '`+owner+`', 'APPROVED', 'PRIMARY_OWNER', now() - interval '3 days'),
-		('reg-retry', 'meter-b', '`+owner+`', 'REJECTED', 'PRIMARY_OWNER', now())`)
+		('reg-first', 'meter-a', '`+owner+`', 'APPROVED', 'PRIMARY_OWNER', now()),
+		('reg-second', 'meter-b', '`+owner+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER', now())`)
 
-	got, err := pg.GetRegistrationByUserID(context.Background(), owner)
-	if err != nil {
-		t.Fatal(err)
+	if err := pg.UpdateMeterRegistrationStatus(context.Background(), "reg-second", "APPROVED"); err == nil {
+		t.Fatal("a second meter was approved for the account")
 	}
-	if got.RegistrationID != "reg-approved" {
-		t.Fatalf("registration = %s, want the approved one even though a rejected one is newer", got.RegistrationID)
-	}
-}
-
-func TestAccountCannotHoldTwoActiveMeters(t *testing.T) {
-	for _, status := range []string{"APPROVED", "DEWA_APPROVAL_PENDING"} {
-		t.Run(status, func(t *testing.T) {
-			pg, db := newRegistrationEnv(t)
-			seedRegistrations(t, db, `('reg-first', 'meter-a', '`+owner+`', '`+status+`', 'PRIMARY_OWNER', now())`)
-
-			err := pg.SaveMeterRegistration(context.Background(), claim("reg-second", "meter-b"))
-			if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
-				t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
-			}
-		})
+	if got := approvalStatus(t, db, "reg-second"); got != "DEWA_APPROVAL_PENDING" {
+		t.Fatalf("reg-second status = %s, want it left pending", got)
 	}
 }
 
-func TestRejectedOrExpiredMetersDoNotBlockANewClaim(t *testing.T) {
-	pg, db := newRegistrationEnv(t)
-	seedRegistrations(t, db, `
-		('reg-rejected', 'meter-a', '`+owner+`', 'REJECTED', 'PRIMARY_OWNER', now()),
-		('reg-expired', 'meter-b', '`+owner+`', 'EXPIRED', 'PRIMARY_OWNER', now())`)
-
-	if err := pg.SaveMeterRegistration(context.Background(), claim("reg-new", "meter-c")); err != nil {
-		t.Fatalf("err = %v, want the claim to be saved", err)
-	}
-}
-
-func TestConcurrentClaimsLeaveOneActiveMeter(t *testing.T) {
+func TestConcurrentApprovalsLeaveOneApprovedMeter(t *testing.T) {
 	pg, db := newRegistrationEnv(t)
 	const claims = 8
+	for i := range claims {
+		if err := pg.SaveMeterRegistration(context.Background(), claim(owner, fmt.Sprintf("reg-%d", i), fmt.Sprintf("meter-%d", i))); err != nil {
+			t.Fatalf("pending claim %d: %v", i, err)
+		}
+	}
 
 	var wg sync.WaitGroup
 	errs := make([]error, claims)
@@ -125,32 +136,29 @@ func TestConcurrentClaimsLeaveOneActiveMeter(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = pg.SaveMeterRegistration(context.Background(), claim(fmt.Sprintf("reg-%d", i), fmt.Sprintf("meter-%d", i)))
+			errs[i] = pg.UpdateMeterRegistrationStatus(context.Background(), fmt.Sprintf("reg-%d", i), "APPROVED")
 		}()
 	}
 	wg.Wait()
 
-	saved := 0
+	approved := 0
 	for _, err := range errs {
-		switch {
-		case err == nil:
-			saved++
-		case !errors.Is(err, domain.ErrMeterAlreadyRegistered):
-			t.Errorf("unexpected error: %v", err)
+		if err == nil {
+			approved++
 		}
 	}
-	if saved != 1 {
-		t.Fatalf("%d claims were saved, want exactly 1", saved)
+	if approved != 1 {
+		t.Fatalf("%d approvals succeeded, want exactly 1", approved)
 	}
 
-	var active int
+	var count int
 	if err := db.QueryRowContext(context.Background(), `
 		SELECT count(*) FROM iot_data.meter_registrations
-		WHERE user_id = $1 AND approval_status IN ('APPROVED', 'DEWA_APPROVAL_PENDING')`, owner).Scan(&active); err != nil {
+		WHERE user_id = $1 AND approval_status = 'APPROVED'`, owner).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if active != 1 {
-		t.Fatalf("%d active registrations, want 1", active)
+	if count != 1 {
+		t.Fatalf("%d approved registrations, want 1", count)
 	}
 }
 
@@ -172,6 +180,6 @@ func TestOneMeterPerAccountMigrationRollsBack(t *testing.T) {
 		t.Fatalf("after rollback two approved meters should be allowed again: %v", err)
 	}
 	if _, err := provider.Up(ctx); err == nil {
-		t.Fatal("up succeeded although the account has two active meters")
+		t.Fatal("up succeeded although the account has two approved meters")
 	}
 }

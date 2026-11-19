@@ -25,9 +25,9 @@ type RegistrationStore interface {
 	UpdateMeterRegistrationStatus(ctx context.Context, registrationID string, status string) error
 	GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
-	// GetActiveRegistrationByUserID returns the account's pending or approved
+	// GetApprovedRegistrationByUserID returns the account's approved
 	// primary-owner registration, or nil when it has none.
-	GetActiveRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error)
+	GetApprovedRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type ActuationDispatcher interface {
@@ -54,16 +54,17 @@ func NewService(client *Client, poller *Poller, store RegistrationStore, dispatc
 	}
 }
 
-// ensureNoOtherMeter enforces one smart meter per account: it fails with
-// domain.ErrMeterAlreadyRegistered when the account already has a pending or
-// approved registration other than registrationID.
-func (s *Service) ensureNoOtherMeter(ctx context.Context, userID, registrationID string) error {
-	active, err := s.store.GetActiveRegistrationByUserID(ctx, userID)
+// ensureNoApprovedMeter enforces one smart meter per account: a claim fails
+// with domain.ErrMeterAlreadyRegistered when the account already has an
+// approved primary-owner meter. Pending, rejected and expired claims never
+// block a new claim: a pending claim is not ownership until DEWA approves it.
+func (s *Service) ensureNoApprovedMeter(ctx context.Context, userID string) error {
+	approved, err := s.store.GetApprovedRegistrationByUserID(ctx, userID)
 	if err != nil {
-		return fmt.Errorf("check existing meter registration: %w", err)
+		return fmt.Errorf("check approved meter registration: %w", err)
 	}
-	if active != nil && active.RegistrationID != registrationID {
-		return fmt.Errorf("account already has meter %q: %w", active.MeterID, domain.ErrMeterAlreadyRegistered)
+	if approved != nil {
+		return fmt.Errorf("account already has approved meter %q: %w", approved.MeterID, domain.ErrMeterAlreadyRegistered)
 	}
 	return nil
 }
@@ -89,7 +90,7 @@ func (s *Service) RegisterHouse(
 		return nil, fmt.Errorf("user reference is required")
 	}
 
-	if err := s.ensureNoOtherMeter(ctx, request.UserReference, request.RegistrationID); err != nil {
+	if err := s.ensureNoApprovedMeter(ctx, request.UserReference); err != nil {
 		return nil, err
 	}
 
@@ -168,7 +169,7 @@ func (s *Service) ReverifyRegistration(
 		return nil, fmt.Errorf("client or store not configured")
 	}
 
-	if err := s.ensureNoOtherMeter(ctx, userReference, registrationID); err != nil {
+	if err := s.ensureNoApprovedMeter(ctx, userReference); err != nil {
 		return nil, err
 	}
 

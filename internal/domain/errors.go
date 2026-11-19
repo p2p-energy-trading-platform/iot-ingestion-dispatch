@@ -51,8 +51,7 @@ var ErrGridNotProvisioned = errors.New("domain: grid is not provisioned")
 // cannot fix it: it is a permanent identity/provisioning failure.
 var ErrHouseIdentity = errors.New("domain: house identity does not match registration")
 
-// ErrMeterAlreadyRegistered marks a meter claim that would give an account a
-// second smart meter, or claim a meter that already has an owner. An account
-// has one smart meter, and a house is identified by its meter; a person with
-// two houses uses two accounts.
+// ErrMeterAlreadyRegistered marks a meter claim by an account that already has
+// an approved smart meter. An account has one smart meter, and a house is
+// identified by its meter; a person with two houses uses two accounts.
 var ErrMeterAlreadyRegistered = errors.New("domain: a smart meter is already registered")

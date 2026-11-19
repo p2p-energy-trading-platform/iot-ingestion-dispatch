@@ -19,7 +19,7 @@ type mockStore struct {
 	updateFunc        func(ctx context.Context, registrationID string, status string) error
 	getRegister       func(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	getRegisterByUser func(ctx context.Context, userReference string) (*RegistrationRecord, error)
-	getActiveByUser   func(ctx context.Context, userID string) (*RegistrationRecord, error)
+	getApprovedByUser func(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type mockActuationProducer struct {
@@ -68,9 +68,9 @@ func (m *mockStore) GetRegistrationByUserID(ctx context.Context, userReference s
 	return nil, nil
 }
 
-func (m *mockStore) GetActiveRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error) {
-	if m.getActiveByUser != nil {
-		return m.getActiveByUser(ctx, userID)
+func (m *mockStore) GetApprovedRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error) {
+	if m.getApprovedByUser != nil {
+		return m.getApprovedByUser(ctx, userID)
 	}
 	return nil, nil
 }
@@ -341,33 +341,36 @@ func dewaMustNotBeCalled(t *testing.T) *httptest.Server {
 	return server
 }
 
-func activeRegistration(registrationID string) func(context.Context, string) (*RegistrationRecord, error) {
-	return func(context.Context, string) (*RegistrationRecord, error) {
+// approvedMeterFor returns a lookup that finds an approved meter for wantUser.
+func approvedMeterFor(t *testing.T, wantUser string) func(context.Context, string) (*RegistrationRecord, error) {
+	return func(_ context.Context, userID string) (*RegistrationRecord, error) {
+		if userID != wantUser {
+			t.Errorf("looked up user %q, want %q", userID, wantUser)
+		}
 		return &RegistrationRecord{
-			RegistrationID: registrationID,
-			MeterID:        "meter-first",
-			UserID:         "user-001",
+			RegistrationID: "reg-approved",
+			MeterID:        "meter-approved",
+			UserID:         userID,
 			Role:           "PRIMARY_OWNER",
 			ApprovalStatus: "APPROVED",
 		}, nil
 	}
 }
 
-func TestRegisterHouseRefusesAccountThatAlreadyHasAMeter(t *testing.T) {
-	server := dewaMustNotBeCalled(t)
-	client := NewClient(server.URL)
+func TestRegisterHouseRefusesAccountThatHasAnApprovedMeter(t *testing.T) {
+	client := NewClient(dewaMustNotBeCalled(t).URL)
 	store := &mockStore{
-		getActiveByUser: activeRegistration("reg-first"),
+		getApprovedByUser: approvedMeterFor(t, "user-001"),
 		saveFunc: func(context.Context, RegistrationRecord) error {
-			t.Error("a second registration was saved")
+			t.Error("the claim was saved")
 			return nil
 		},
 	}
 	service := NewService(client, NewPoller(client), store, nil, slog.Default())
 
 	_, err := service.RegisterHouse(context.Background(), LinkRequest{
-		RegistrationID: "reg-second",
-		MeterID:        "meter-second",
+		RegistrationID: "reg-new",
+		MeterID:        "meter-new",
 		UserReference:  "user-001",
 	})
 	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
@@ -375,70 +378,36 @@ func TestRegisterHouseRefusesAccountThatAlreadyHasAMeter(t *testing.T) {
 	}
 }
 
-func TestReverifyRefusesNewRegistrationWhenAccountHasAMeter(t *testing.T) {
-	server := dewaMustNotBeCalled(t)
-	client := NewClient(server.URL)
-	store := &mockStore{
-		getActiveByUser: activeRegistration("reg-first"),
-		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+func TestReverifyRefusesAccountThatHasAnApprovedMeter(t *testing.T) {
+	cases := map[string]func(context.Context, string) (*RegistrationRecord, error){
+		"unknown registration": func(context.Context, string) (*RegistrationRecord, error) {
 			return nil, fmt.Errorf("not found")
 		},
-		saveFunc: func(context.Context, RegistrationRecord) error {
-			t.Error("a second registration was saved")
-			return nil
-		},
-	}
-	service := NewService(client, NewPoller(client), store, nil, slog.Default())
-
-	_, err := service.ReverifyRegistration(context.Background(), "reg-second", "user-001", "meter-second")
-	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
-		t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
-	}
-}
-
-func TestReverifyRefusesOldRegistrationWhenAccountHasAnotherMeter(t *testing.T) {
-	server := dewaMustNotBeCalled(t)
-	client := NewClient(server.URL)
-	store := &mockStore{
-		getActiveByUser: activeRegistration("reg-first"),
-		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
+		"existing registration": func(context.Context, string) (*RegistrationRecord, error) {
 			return &RegistrationRecord{RegistrationID: "reg-old", MeterID: "meter-old", UserID: "user-001", ApprovalStatus: "REJECTED"}, nil
 		},
-		updateFunc: func(context.Context, string, string) error {
-			t.Error("the old registration was made pending again")
-			return nil
-		},
 	}
-	service := NewService(client, NewPoller(client), store, nil, slog.Default())
+	for name, getFunc := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := NewClient(dewaMustNotBeCalled(t).URL)
+			store := &mockStore{
+				getApprovedByUser: approvedMeterFor(t, "user-001"),
+				getFunc:           getFunc,
+				saveFunc: func(context.Context, RegistrationRecord) error {
+					t.Error("the claim was saved")
+					return nil
+				},
+				updateFunc: func(context.Context, string, string) error {
+					t.Error("the registration was made pending again")
+					return nil
+				},
+			}
+			service := NewService(client, NewPoller(client), store, nil, slog.Default())
 
-	_, err := service.ReverifyRegistration(context.Background(), "reg-old", "user-001", "meter-old")
-	if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
-		t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
-	}
-}
-
-func TestReverifyAllowsTheAccountsOwnRegistration(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"status":"PENDING","message":"Link request created"}`))
-	}))
-	defer server.Close()
-	client := NewClient(server.URL)
-	store := &mockStore{
-		getActiveByUser: activeRegistration("reg-first"),
-		getFunc: func(context.Context, string) (*RegistrationRecord, error) {
-			return &RegistrationRecord{RegistrationID: "reg-first", MeterID: "meter-first", UserID: "user-001", ApprovalStatus: "DEWA_APPROVAL_PENDING"}, nil
-		},
-	}
-	service := NewService(client, nil, store, nil, slog.Default())
-
-	if _, err := service.ReverifyRegistration(context.Background(), "reg-first", "user-001", "meter-first"); err != nil {
-		t.Fatalf("err = %v, want the account's own registration to be re-verified", err)
-	}
-	if !called {
-		t.Error("DEWA was not asked to re-verify")
+			_, err := service.ReverifyRegistration(context.Background(), "reg-old", "user-001", "meter-old")
+			if !errors.Is(err, domain.ErrMeterAlreadyRegistered) {
+				t.Fatalf("err = %v, want ErrMeterAlreadyRegistered", err)
+			}
+		})
 	}
 }
