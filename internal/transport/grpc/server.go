@@ -10,9 +10,30 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 )
 
 const gracefulStopTimeout = 5 * time.Second
+
+// Options tunes the server for long-lived streams. Zero values use the defaults.
+type Options struct {
+	// MaxConcurrentStreams limits open RPCs per client connection (default 1000).
+	MaxConcurrentStreams uint32
+	// KeepaliveMinTime is the shortest ping interval a client may use without
+	// being disconnected for too_many_pings (default 20s). grpc-go's own
+	// default, 5 minutes, would reject a gateway that pings every 30s.
+	KeepaliveMinTime time.Duration
+}
+
+func (o Options) withDefaults() Options {
+	if o.MaxConcurrentStreams == 0 {
+		o.MaxConcurrentStreams = 1000
+	}
+	if o.KeepaliveMinTime == 0 {
+		o.KeepaliveMinTime = 20 * time.Second
+	}
+	return o
+}
 
 // Services holds the handlers this server registers next to the health service.
 type Services struct {
@@ -27,7 +48,13 @@ type Server struct {
 	logger  *slog.Logger
 }
 
-func New(address string, logger *slog.Logger, services Services) *Server {
+func New(address string, logger *slog.Logger, services Services, options ...Options) *Server {
+	var opts Options
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	opts = opts.withDefaults()
+
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(4<<20),
 		grpc.MaxSendMsgSize(4<<20),
@@ -35,6 +62,17 @@ func New(address string, logger *slog.Logger, services Services) *Server {
 			UnaryServerRecovery(logger),
 			UnaryServerLogger(logger),
 		),
+		grpc.ChainStreamInterceptor(
+			StreamServerRecovery(logger),
+			StreamServerLogger(logger),
+		),
+		grpc.MaxConcurrentStreams(opts.MaxConcurrentStreams),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             opts.KeepaliveMinTime,
+			PermitWithoutStream: true,
+		}),
+		// Find dead clients of idle streams; a stream may send nothing for minutes.
+		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 2 * time.Minute, Timeout: 20 * time.Second}),
 	)
 
 	healthServer := health.NewServer()

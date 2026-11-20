@@ -30,6 +30,8 @@ type fakeQueries struct {
 	series  []query.EnergyBucket
 	summary query.EnergySummary
 	err     error
+	// latestErr, when set, fails only GetLatestReading.
+	latestErr error
 
 	gotList    query.ListHousesParams
 	gotHouseID string
@@ -50,6 +52,9 @@ func (f *fakeQueries) GetHouse(_ context.Context, houseID, owner string) (query.
 
 func (f *fakeQueries) GetLatestReading(_ context.Context, houseID, owner string) (redisstore.MeterProjection, error) {
 	f.gotHouseID, f.gotOwner = houseID, owner
+	if f.latestErr != nil {
+		return redisstore.MeterProjection{}, f.latestErr
+	}
 	return f.latest, f.err
 }
 

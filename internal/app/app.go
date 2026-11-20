@@ -9,6 +9,7 @@ import (
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/admission"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/config"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/ingestion"
+	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/live"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/observability"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/query"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
@@ -29,6 +30,7 @@ type App struct {
 	router       *ingestion.Router
 	producer     *actuation.KafkaActuationProducer
 	grpc         *grpctransport.Server
+	liveHub      *live.Hub // nil when live updates are disabled
 	health       *httphealth.Server
 	metrics      *observability.Metrics
 	metricsHTTP  *httphealth.MetricsServer
@@ -128,19 +130,22 @@ func New(
 		cachePolicy = ingestion.CacheAsyncRepair
 	}
 
+	meterHandler := ingestion.NewMeterHandler(admissionRegistry, postgres, redis, logger).
+		WithInputLimits(limits).
+		WithCachePolicy(cachePolicy, config.Kafka.MeterTopic, metrics)
+	heartbeatHandler := ingestion.NewHeartbeatHandler(admissionRegistry, postgres, redis, logger).
+		WithInputLimits(limits).
+		WithCachePolicy(cachePolicy, config.Kafka.HeartbeatTopic, metrics)
+	if config.Live.Enabled {
+		// Live events reach StreamHouseLive callers on every instance.
+		publisher := live.NewPublisher(redis, logger, metrics)
+		meterHandler.WithLivePublisher(publisher)
+		heartbeatHandler.WithLivePublisher(publisher)
+	}
+
 	router := ingestion.NewRouter()
-	router.Register(
-		config.Kafka.MeterTopic,
-		ingestion.NewMeterHandler(admissionRegistry, postgres, redis, logger).
-			WithInputLimits(limits).
-			WithCachePolicy(cachePolicy, config.Kafka.MeterTopic, metrics),
-	)
-	router.Register(
-		config.Kafka.HeartbeatTopic,
-		ingestion.NewHeartbeatHandler(admissionRegistry, postgres, redis, logger).
-			WithInputLimits(limits).
-			WithCachePolicy(cachePolicy, config.Kafka.HeartbeatTopic, metrics),
-	)
+	router.Register(config.Kafka.MeterTopic, meterHandler)
+	router.Register(config.Kafka.HeartbeatTopic, heartbeatHandler)
 	router.Register(
 		config.Kafka.ActuationResponseTopic,
 		ingestion.NewActuationHandler(postgres, logger),
@@ -201,12 +206,23 @@ func New(
 	regPoller := registration.NewPoller(dewaClient)
 	regService := registration.NewService(dewaClient, regPoller, postgres, actuationProducer, logger)
 
+	iotHandler := grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger)
+	var liveHub *live.Hub
+	if config.Live.Enabled {
+		liveHub = live.NewHub(redis.NewLiveSubscriber(context), redis, live.HubOptions{Metrics: metrics, Logger: logger})
+		iotHandler.WithLive(liveHub, config.Live.StreamMaxAge)
+	}
+
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,
 		logger,
 		grpctransport.Services{
-			Iot:                grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger),
+			Iot:                iotHandler,
 			DeviceRegistration: grpcservices.NewRegistrationHandler(regService, logger),
+		},
+		grpctransport.Options{
+			MaxConcurrentStreams: uint32(config.GRPC.MaxConcurrentStreams), //nolint:gosec // validated non-negative
+			KeepaliveMinTime:     config.GRPC.KeepaliveMinTime,
 		},
 	)
 
@@ -223,6 +239,7 @@ func New(
 		producer:    actuationProducer,
 		router:      router,
 		grpc:        grpcServer,
+		liveHub:     liveHub,
 		health:      healthServer,
 		metrics:     metrics,
 		stopTracing: stopTracing,

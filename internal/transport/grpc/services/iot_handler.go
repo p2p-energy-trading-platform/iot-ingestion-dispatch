@@ -32,6 +32,10 @@ type IotHandler struct {
 	iotv1.UnimplementedIotServiceServer
 	queries IotQueries
 	logger  *slog.Logger
+
+	// live is nil when live updates are disabled.
+	live         LiveWatcher
+	streamMaxAge time.Duration
 }
 
 func NewIotHandler(queries IotQueries, logger *slog.Logger) *IotHandler {
@@ -87,6 +91,10 @@ func (s *IotHandler) GetLatestReading(ctx context.Context, req *iotv1.GetLatestR
 	if err != nil {
 		return nil, s.fail(ctx, "GetLatestReading", err)
 	}
+	return &iotv1.GetLatestReadingResponse{Reading: toProtoReading(r)}, nil
+}
+
+func toProtoReading(r redisstore.MeterProjection) *iotv1.MeterReading {
 	reading := &iotv1.MeterReading{
 		MeterId:       r.MeterID,
 		MeasuredAt:    timestamppb.New(time.UnixMilli(r.EventTimeUnixMs)),
@@ -105,7 +113,7 @@ func (s *IotHandler) GetLatestReading(ctx context.Context, req *iotv1.GetLatestR
 			PluggedIn:   a.PluggedIn,
 		})
 	}
-	return &iotv1.GetLatestReadingResponse{Reading: reading}, nil
+	return reading
 }
 
 func (s *IotHandler) GetEnergySeries(ctx context.Context, req *iotv1.GetEnergySeriesRequest) (*iotv1.GetEnergySeriesResponse, error) {

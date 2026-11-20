@@ -112,11 +112,11 @@ func TestUpdateHeartbeatSetsStatusTTLAndMembership(t *testing.T) {
 	grid, house := uniqueHouse(t, store)
 	at := time.Now().UTC().Truncate(time.Second)
 
-	if err := store.UpdateHeartbeat(ctx, grid, house, HouseStatus{Status: "online", LastHeartbeatAt: at}); err != nil {
+	if _, err := store.UpdateHeartbeat(ctx, grid, house, HouseStatus{Status: "online", LastHeartbeatAt: at}); err != nil {
 		t.Fatal(err)
 	}
 	// Idempotent: a replay changes nothing.
-	if err := store.UpdateHeartbeat(ctx, grid, house, HouseStatus{Status: "online", LastHeartbeatAt: at}); err != nil {
+	if _, err := store.UpdateHeartbeat(ctx, grid, house, HouseStatus{Status: "online", LastHeartbeatAt: at}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,5 +214,103 @@ func TestConfigOptions(t *testing.T) {
 	}
 	if secure.MaxRetries != 3 {
 		t.Errorf("MaxRetries = %d, want 3", secure.MaxRetries)
+	}
+}
+
+func TestUpdateHeartbeatReportsWhenTheHouseComesOnline(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	grid, house := uniqueHouse(t, store)
+	status := HouseStatus{Status: "online", LastHeartbeatAt: time.Now().UTC().Truncate(time.Second)}
+
+	for _, step := range []struct {
+		name string
+		prep func()
+		want bool
+	}{
+		{"first heartbeat", func() {}, true},
+		{"next heartbeat", func() {}, false},
+		{"after the status expired", func() { store.rdb.Del(ctx, HouseStatusKey(house)) }, true},
+	} {
+		step.prep()
+		cameOnline, err := store.UpdateHeartbeat(ctx, grid, house, status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cameOnline != step.want {
+			t.Fatalf("%s: cameOnline = %v, want %v", step.name, cameOnline, step.want)
+		}
+	}
+}
+
+// receive waits for the next live message, or fails after timeout.
+func receive(t *testing.T, sub *LiveSubscriber, timeout time.Duration) (LiveMessage, bool) {
+	t.Helper()
+	select {
+	case msg, ok := <-sub.Messages():
+		return msg, ok
+	case <-time.After(timeout):
+		return LiveMessage{}, false
+	}
+}
+
+func TestLiveSubscriberReceivesPublishedEventsForWatchedHouses(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	_, house := uniqueHouse(t, store)
+	_, other := uniqueHouse(t, store)
+	sub := store.NewLiveSubscriber(ctx)
+	t.Cleanup(func() { _ = sub.Close() })
+
+	if err := sub.Subscribe(ctx, house); err != nil {
+		t.Fatal(err)
+	}
+	// SUBSCRIBE is asynchronous: publish until the subscription is active.
+	var msg LiveMessage
+	for start := time.Now(); ; {
+		if err := store.Publish(ctx, HouseLiveChannel(house), []byte(`{"v":1}`)); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := receive(t, sub, 50*time.Millisecond); ok {
+			msg = got
+			break
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Fatal("no message received")
+		}
+	}
+	if msg.HouseID != house || string(msg.Payload) != `{"v":1}` {
+		t.Fatalf("message = %+v, want house %s with the payload", msg, house)
+	}
+
+	if err := store.Publish(ctx, HouseLiveChannel(other), []byte(`{"v":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Unsubscribe(ctx, house); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Publish(ctx, HouseLiveChannel(house), []byte(`{"v":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := receive(t, sub, 200*time.Millisecond); ok {
+		t.Fatalf("received %+v from an unwatched house or after unsubscribe", got)
+	}
+}
+
+func TestLiveSubscriberCloseEndsMessages(t *testing.T) {
+	store := newTestStore(t)
+	sub := store.NewLiveSubscriber(context.Background())
+
+	if err := sub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := receive(t, sub, time.Second); ok {
+		t.Fatal("messages channel still open after Close")
+	}
+}
+
+func TestHouseLiveChannel(t *testing.T) {
+	if got := HouseLiveChannel("grid01-house0003"); got != "house:grid01-house0003:live" {
+		t.Fatalf("channel = %q", got)
 	}
 }

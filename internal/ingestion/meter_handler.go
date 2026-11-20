@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/admission"
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
@@ -26,6 +27,13 @@ type LatestWriter interface {
 	SetLatestIfNewer(ctx context.Context, p redisstore.MeterProjection) (applied bool, err error)
 }
 
+// LivePublisher announces live events to StreamHouseLive callers. It is
+// satisfied by *live.Publisher and never fails: publishing is best effort.
+type LivePublisher interface {
+	PublishReading(ctx context.Context, r redisstore.MeterProjection)
+	PublishOnline(ctx context.Context, houseID string, lastHeartbeatAt time.Time)
+}
+
 // MeterHandler runs the meter-reading workflow. It returns nil only when
 // every required step succeeded, which is the signal for the partition
 // worker to commit the Kafka offset.
@@ -33,6 +41,7 @@ type MeterHandler struct {
 	admission GridAdmitter
 	writer    MeterWriter
 	latest    LatestWriter
+	live      LivePublisher
 	logger    *slog.Logger
 
 	topic   string
@@ -52,6 +61,9 @@ func NewMeterHandler(admission GridAdmitter, writer MeterWriter, latest LatestWr
 
 // WithInputLimits sets the record size and key checks. topic labels metrics.
 func (h *MeterHandler) WithInputLimits(l InputLimits) *MeterHandler { h.limits = l; return h }
+
+// WithLivePublisher announces each reading that becomes the house's latest.
+func (h *MeterHandler) WithLivePublisher(p LivePublisher) *MeterHandler { h.live = p; return h }
 
 // WithCachePolicy sets the acknowledgement policy for Redis failures.
 func (h *MeterHandler) WithCachePolicy(p CachePolicy, topic string, m Metrics) *MeterHandler {
@@ -92,9 +104,17 @@ func (h *MeterHandler) HandleRecord(ctx context.Context, key, value []byte) erro
 
 	// 7. Latest state, only if newer. Runs on replays as well, in case a
 	// previous attempt committed to Postgres but failed here.
-	if _, err := h.latest.SetLatestIfNewer(ctx, toMeterProjection(reading)); err != nil {
+	projection := toMeterProjection(reading)
+	applied, err := h.latest.SetLatestIfNewer(ctx, projection)
+	if err != nil {
 		err = fmt.Errorf("update latest state for %s: %w", reading.MeterID, err)
 		return absorbCacheError(h.policy, h.metrics, h.logger, h.topic, err)
+	}
+
+	// Only a reading that became the latest is live news; replays and
+	// out-of-order readings are not.
+	if applied && h.live != nil {
+		h.live.PublishReading(ctx, projection)
 	}
 
 	// 8. The caller commits the Kafka offset on nil.

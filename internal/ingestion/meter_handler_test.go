@@ -53,12 +53,14 @@ func (f *fakeWriter) InsertMeterReading(_ context.Context, r domain.MeterReading
 
 type fakeLatest struct {
 	calls []redisstore.MeterProjection
+	// stale makes Redis report that it already holds a newer reading.
+	stale bool
 	err   error
 }
 
 func (f *fakeLatest) SetLatestIfNewer(_ context.Context, p redisstore.MeterProjection) (bool, error) {
 	f.calls = append(f.calls, p)
-	return true, f.err
+	return !f.stale && f.err == nil, f.err
 }
 
 func newTestMeterHandler(w *fakeWriter, l *fakeLatest) *MeterHandler {
@@ -151,5 +153,44 @@ func TestMeterHandlerRedisFailureIsReturned(t *testing.T) {
 	err := h.HandleRecord(context.Background(), nil, []byte(validMeterJSON()))
 	if !errors.Is(err, errRedis) {
 		t.Fatalf("error = %v, want it to wrap errRedis", err)
+	}
+}
+
+func TestMeterHandlerPublishesReadingsStoredAsLatest(t *testing.T) {
+	w, l, live := &fakeWriter{inserted: true}, &fakeLatest{}, &fakeLive{}
+	h := newTestMeterHandler(w, l).WithLivePublisher(live)
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validMeterJSON())); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.readings) != 1 {
+		t.Fatalf("published %d readings, want 1", len(live.readings))
+	}
+	if got := live.readings[0]; got.HouseID != "grid01-house0042" || got.Seq != 184231 || got.NetKw != 1.54 || len(got.StorageAssets) != 1 {
+		t.Fatalf("published %+v, want the stored projection", got)
+	}
+}
+
+func TestMeterHandlerDoesNotPublishOlderReadings(t *testing.T) {
+	w, l, live := &fakeWriter{inserted: true}, &fakeLatest{stale: true}, &fakeLive{}
+	h := newTestMeterHandler(w, l).WithLivePublisher(live)
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validMeterJSON())); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.readings) != 0 {
+		t.Fatalf("published %d readings, want none for a reading older than the latest", len(live.readings))
+	}
+}
+
+func TestMeterHandlerDoesNotPublishWhenRedisFails(t *testing.T) {
+	w, l, live := &fakeWriter{inserted: true}, &fakeLatest{err: errors.New("redis down")}, &fakeLive{}
+	h := newTestMeterHandler(w, l).WithLivePublisher(live).WithCachePolicy(CacheAsyncRepair, "meter", nil)
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validMeterJSON())); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.readings) != 0 {
+		t.Fatalf("published %d readings although Redis failed", len(live.readings))
 	}
 }
