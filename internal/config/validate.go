@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Validate rejects missing, out-of-range and contradictory settings so a bad
@@ -35,6 +36,17 @@ func (config Config) Validate() error {
 	}
 	if config.Input.MaxConcurrentHandlers < 0 {
 		add("INGESTION_MAX_CONCURRENT_HANDLERS must not be negative")
+	}
+
+	// Zero means "Config built by hand"; Load always sets them.
+	if config.Live.StreamMaxAge < 0 || (config.Live.StreamMaxAge > 0 && config.Live.StreamMaxAge < time.Minute) {
+		add("LIVE_STREAM_MAX_AGE must be at least 1m")
+	}
+	if config.GRPC.MaxConcurrentStreams < 0 {
+		add("GRPC_MAX_CONCURRENT_STREAMS must not be negative")
+	}
+	if config.GRPC.KeepaliveMinTime < 0 {
+		add("GRPC_KEEPALIVE_MIN_TIME must not be negative")
 	}
 
 	switch config.Redis.AckPolicy {

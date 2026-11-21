@@ -17,6 +17,7 @@ type Config struct {
 	Postgres        PostgresConfig
 	Redis           RedisConfig
 	GRPC            GRPCConfig
+	Live            LiveConfig
 	Health          HealthConfig
 	Admission       AdmissionConfig
 	Retry           RetryConfig
@@ -143,6 +144,16 @@ type RedisConfig struct {
 
 type GRPCConfig struct {
 	Address string
+	// MaxConcurrentStreams limits open RPCs per client connection.
+	MaxConcurrentStreams int32
+	// KeepaliveMinTime is the shortest ping interval a client may use.
+	KeepaliveMinTime time.Duration
+}
+
+// LiveConfig controls StreamHouseLive.
+type LiveConfig struct {
+	// StreamMaxAge ends each stream after this long; callers reopen it.
+	StreamMaxAge time.Duration
 }
 
 type HealthConfig struct {
@@ -216,7 +227,13 @@ func Load() (*Config, error) {
 		},
 
 		GRPC: GRPCConfig{
-			Address: env("GRPC_ADDRESS", ":50051"),
+			Address:              env("GRPC_ADDRESS", ":50051"),
+			MaxConcurrentStreams: r.int32("GRPC_MAX_CONCURRENT_STREAMS", 1000),
+			KeepaliveMinTime:     r.duration("GRPC_KEEPALIVE_MIN_TIME", 20*time.Second),
+		},
+
+		Live: LiveConfig{
+			StreamMaxAge: r.duration("LIVE_STREAM_MAX_AGE", time.Hour),
 		},
 
 		Health: HealthConfig{
