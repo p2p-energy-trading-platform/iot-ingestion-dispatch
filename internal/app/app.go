@@ -30,7 +30,7 @@ type App struct {
 	router       *ingestion.Router
 	producer     *actuation.KafkaActuationProducer
 	grpc         *grpctransport.Server
-	liveHub      *live.Hub // nil when live updates are disabled
+	liveHub      *live.Hub
 	health       *httphealth.Server
 	metrics      *observability.Metrics
 	metricsHTTP  *httphealth.MetricsServer
@@ -136,12 +136,10 @@ func New(
 	heartbeatHandler := ingestion.NewHeartbeatHandler(admissionRegistry, postgres, redis, logger).
 		WithInputLimits(limits).
 		WithCachePolicy(cachePolicy, config.Kafka.HeartbeatTopic, metrics)
-	if config.Live.Enabled {
-		// Live events reach StreamHouseLive callers on every instance.
-		publisher := live.NewPublisher(redis, logger, metrics)
-		meterHandler.WithLivePublisher(publisher)
-		heartbeatHandler.WithLivePublisher(publisher)
-	}
+	// Live events reach StreamHouseLive callers on every instance.
+	publisher := live.NewPublisher(redis, logger)
+	meterHandler.WithLivePublisher(publisher)
+	heartbeatHandler.WithLivePublisher(publisher)
 
 	router := ingestion.NewRouter()
 	router.Register(config.Kafka.MeterTopic, meterHandler)
@@ -206,12 +204,9 @@ func New(
 	regPoller := registration.NewPoller(dewaClient)
 	regService := registration.NewService(dewaClient, regPoller, postgres, actuationProducer, logger)
 
-	iotHandler := grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger)
-	var liveHub *live.Hub
-	if config.Live.Enabled {
-		liveHub = live.NewHub(redis.NewLiveSubscriber(context), redis, live.HubOptions{Metrics: metrics, Logger: logger})
-		iotHandler.WithLive(liveHub, config.Live.StreamMaxAge)
-	}
+	liveHub := live.NewHub(redis.NewLiveSubscriber(context), redis, live.HubOptions{Logger: logger})
+	iotHandler := grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger).
+		WithLive(liveHub, config.Live.StreamMaxAge)
 
 	grpcServer := grpctransport.New(
 		config.GRPC.Address,

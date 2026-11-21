@@ -36,13 +36,6 @@ type StatusReader interface {
 	GetHouseStatus(ctx context.Context, houseID string) (redisstore.HouseStatus, error)
 }
 
-// HubMetrics is satisfied by *observability.Metrics.
-type HubMetrics interface {
-	LiveEventConflated()
-	LiveOfflineDetected()
-	LiveStreamsChanged(delta int)
-}
-
 // Timer is a scheduled call that can be cancelled.
 type Timer interface {
 	Stop() bool
@@ -60,9 +53,8 @@ func (realClock) Now() time.Time                             { return time.Now()
 func (realClock) AfterFunc(d time.Duration, fn func()) Timer { return time.AfterFunc(d, fn) }
 
 type HubOptions struct {
-	Clock   Clock
-	Metrics HubMetrics
-	Logger  *slog.Logger
+	Clock  Clock
+	Logger *slog.Logger
 }
 
 // Hub fans live events out to the streams on this instance. It holds one
@@ -72,11 +64,10 @@ type HubOptions struct {
 // So for each watched house the hub sets a timer for the end of the liveness
 // window and, when it fires, checks whether the status key is gone.
 type Hub struct {
-	sub     Subscriber
-	status  StatusReader
-	clock   Clock
-	metrics HubMetrics
-	logger  *slog.Logger
+	sub    Subscriber
+	status StatusReader
+	clock  Clock
+	logger *slog.Logger
 
 	// mu guards the fields below. It is never held during Redis calls, so a
 	// slow Redis cannot hold up the delivery of other houses' events.
@@ -108,9 +99,6 @@ func NewHub(sub Subscriber, status StatusReader, opts HubOptions) *Hub {
 	if opts.Clock == nil {
 		opts.Clock = realClock{}
 	}
-	if opts.Metrics == nil {
-		opts.Metrics = nopMetrics{}
-	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -118,7 +106,6 @@ func NewHub(sub Subscriber, status StatusReader, opts HubOptions) *Hub {
 		sub:     sub,
 		status:  status,
 		clock:   opts.Clock,
-		metrics: opts.Metrics,
 		logger:  opts.Logger,
 		houses:  map[string]*watchedHouse{},
 		runDone: make(chan struct{}),
@@ -167,7 +154,6 @@ func (h *Hub) Watch(ctx context.Context, houseID string) (*Stream, error) {
 		done:    make(chan struct{}),
 	}
 	house.streams[s] = struct{}{}
-	h.metrics.LiveStreamsChanged(1)
 	return s, nil
 }
 
@@ -219,7 +205,6 @@ func (h *Hub) Close() {
 			stopTimer(house)
 			for s := range house.streams {
 				close(s.done)
-				h.metrics.LiveStreamsChanged(-1)
 			}
 		}
 		h.houses = map[string]*watchedHouse{}
@@ -291,7 +276,6 @@ func (h *Hub) checkOffline(houseID string, gen uint64) {
 	case errors.Is(err, redisstore.ErrNotFound):
 		if house.online {
 			house.online = false
-			h.metrics.LiveOfflineDetected()
 			h.broadcastStatus(house, Status{Online: false})
 		}
 	case err != nil:
@@ -328,7 +312,6 @@ func (h *Hub) release(s *Stream) (last bool) {
 		return false
 	}
 	delete(house.streams, s)
-	h.metrics.LiveStreamsChanged(-1)
 	if len(house.streams) > 0 {
 		return false
 	}
@@ -403,9 +386,6 @@ func (s *Stream) Close() {
 
 func (s *Stream) offerReading(r redisstore.MeterProjection) {
 	s.mu.Lock()
-	if s.reading != nil {
-		s.hub.metrics.LiveEventConflated()
-	}
 	s.reading = &r
 	s.mu.Unlock()
 	s.wake()
@@ -413,9 +393,6 @@ func (s *Stream) offerReading(r redisstore.MeterProjection) {
 
 func (s *Stream) offerStatus(status Status) {
 	s.mu.Lock()
-	if s.status != nil {
-		s.hub.metrics.LiveEventConflated()
-	}
 	s.status = &status
 	s.mu.Unlock()
 	s.wake()

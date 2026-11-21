@@ -33,9 +33,6 @@ func (s *IotHandler) WithLive(watcher LiveWatcher, maxAge time.Duration) *IotHan
 // (UNAVAILABLE).
 func (s *IotHandler) StreamHouseLive(req *iotv1.StreamHouseLiveRequest, stream grpc.ServerStreamingServer[iotv1.StreamHouseLiveResponse]) error {
 	ctx := stream.Context()
-	if s.live == nil {
-		return status.Error(codes.Unavailable, "live updates are disabled")
-	}
 
 	// Validation and the optional owner check, exactly as for GetHouse.
 	house, _, err := s.queries.GetHouse(ctx, req.GetHouseId(), req.GetOwnerUserId())

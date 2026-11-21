@@ -56,10 +56,8 @@ func (app *App) shutdown() error {
 	// Live streams never finish on their own, so end them first: they close
 	// with UNAVAILABLE and callers reconnect to a healthy instance at once,
 	// instead of waiting for the graceful-stop timeout.
-	if app.liveHub != nil {
-		app.logger.Info("Closing live streams")
-		app.liveHub.Close()
-	}
+	app.logger.Info("Closing live streams")
+	app.liveHub.Close()
 
 	app.logger.Info("Stopping grpc server")
 	app.grpc.Stop()

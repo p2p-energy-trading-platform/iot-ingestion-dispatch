@@ -94,9 +94,8 @@ type streamEnv struct {
 	publisher *live.Publisher
 }
 
-// newStreamEnv serves the handler over an in-memory gRPC connection. A nil
-// option leaves live updates disabled.
-func newStreamEnv(t *testing.T, maxAge time.Duration, withLive bool) *streamEnv {
+// newStreamEnv serves the handler over an in-memory gRPC connection.
+func newStreamEnv(t *testing.T, maxAge time.Duration) *streamEnv {
 	t.Helper()
 	env := &streamEnv{
 		queries: &fakeQueries{
@@ -110,12 +109,9 @@ func newStreamEnv(t *testing.T, maxAge time.Duration, withLive bool) *streamEnv 
 	}
 	env.hub = live.NewHub(env.redis, env.redis, live.HubOptions{Logger: helpers.TestLogger()})
 	t.Cleanup(env.hub.Close)
-	env.publisher = live.NewPublisher(env.redis, helpers.TestLogger(), nil)
+	env.publisher = live.NewPublisher(env.redis, helpers.TestLogger())
 
-	handler := NewIotHandler(env.queries, helpers.TestLogger())
-	if withLive {
-		handler = handler.WithLive(env.hub, maxAge)
-	}
+	handler := NewIotHandler(env.queries, helpers.TestLogger()).WithLive(env.hub, maxAge)
 
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
@@ -172,7 +168,7 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 func TestStreamHouseLiveSendsTheSnapshotThenLiveEvents(t *testing.T) {
-	env := newStreamEnv(t, time.Minute, true)
+	env := newStreamEnv(t, time.Minute)
 	stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1", OwnerUserId: "u1"})
 
 	first := recv(t, stream).GetStatus()
@@ -197,7 +193,8 @@ func TestStreamHouseLiveSendsTheSnapshotThenLiveEvents(t *testing.T) {
 		t.Fatalf("live reading = %v", r)
 	}
 
-	later := beat.Add(time.Minute)
+	// A real heartbeat carries the time it was received, so the hub does not treat it as expired.
+	later := time.Now().UTC().Truncate(time.Second)
 	env.publisher.PublishOnline(context.Background(), "h1", later)
 	if s := recv(t, stream).GetStatus(); s.GetMeterStatus() != iotv1.MeterStatus_METER_STATUS_ONLINE || !s.GetLastHeartbeatAt().AsTime().Equal(later) {
 		t.Fatalf("live status = %v", s)
@@ -205,7 +202,7 @@ func TestStreamHouseLiveSendsTheSnapshotThenLiveEvents(t *testing.T) {
 }
 
 func TestStreamHouseLiveSnapshotWithoutReadingOrHeartbeat(t *testing.T) {
-	env := newStreamEnv(t, time.Minute, true)
+	env := newStreamEnv(t, time.Minute)
 	env.queries.house = query.House{HouseInfoRow: postgresstore.HouseInfoRow{HouseID: "h1", GridID: "grid01"}}
 	env.queries.latestErr = domain.ErrNotFound
 	stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1"})
@@ -232,7 +229,7 @@ func TestStreamHouseLiveChecksTheHouseFirst(t *testing.T) {
 		{"bad ID", domain.NewValidationError("house_id", "is required"), codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newStreamEnv(t, time.Minute, true)
+			env := newStreamEnv(t, time.Minute)
 			env.queries.err = tc.err
 			stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1", OwnerUserId: "u2"})
 
@@ -250,7 +247,7 @@ func TestStreamHouseLiveChecksTheHouseFirst(t *testing.T) {
 }
 
 func TestStreamHouseLiveEndsAtItsMaximumAge(t *testing.T) {
-	env := newStreamEnv(t, 100*time.Millisecond, true)
+	env := newStreamEnv(t, 100*time.Millisecond)
 	stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1"})
 
 	if got := recvCode(t, stream); got != codes.DeadlineExceeded {
@@ -260,7 +257,7 @@ func TestStreamHouseLiveEndsAtItsMaximumAge(t *testing.T) {
 }
 
 func TestStreamHouseLiveEndsWithUnavailableWhenTheHubCloses(t *testing.T) {
-	env := newStreamEnv(t, time.Minute, true)
+	env := newStreamEnv(t, time.Minute)
 	stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1"})
 	recv(t, stream)
 	recv(t, stream)
@@ -273,7 +270,7 @@ func TestStreamHouseLiveEndsWithUnavailableWhenTheHubCloses(t *testing.T) {
 }
 
 func TestStreamHouseLiveReleasesTheHouseWhenTheClientLeaves(t *testing.T) {
-	env := newStreamEnv(t, time.Minute, true)
+	env := newStreamEnv(t, time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	stream := env.open(t, ctx, &iotv1.StreamHouseLiveRequest{HouseId: "h1"})
 	recv(t, stream)
@@ -282,13 +279,4 @@ func TestStreamHouseLiveReleasesTheHouseWhenTheClientLeaves(t *testing.T) {
 	cancel()
 
 	waitFor(t, func() bool { return !env.redis.isSubscribed("h1") })
-}
-
-func TestStreamHouseLiveIsUnavailableWhenDisabled(t *testing.T) {
-	env := newStreamEnv(t, time.Minute, false)
-	stream := env.open(t, context.Background(), &iotv1.StreamHouseLiveRequest{HouseId: "h1"})
-
-	if got := recvCode(t, stream); got != codes.Unavailable {
-		t.Fatalf("code = %v, want Unavailable", got)
-	}
 }

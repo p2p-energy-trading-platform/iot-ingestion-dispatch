@@ -1,9 +1,12 @@
 package live
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,32 +33,6 @@ func (f *fakeSender) Publish(_ context.Context, channel string, payload []byte) 
 	}
 	f.published[channel] = append(f.published[channel], string(payload))
 	return nil
-}
-
-type fakeMetrics struct {
-	mu                                sync.Mutex
-	published                         map[string]int
-	publishErrors, conflated, offline int
-	streams                           int
-}
-
-func (m *fakeMetrics) LiveEventPublished(eventType string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.published == nil {
-		m.published = map[string]int{}
-	}
-	m.published[eventType]++
-}
-func (m *fakeMetrics) LivePublishFailed()       { m.mu.Lock(); m.publishErrors++; m.mu.Unlock() }
-func (m *fakeMetrics) LiveEventConflated()      { m.mu.Lock(); m.conflated++; m.mu.Unlock() }
-func (m *fakeMetrics) LiveOfflineDetected()     { m.mu.Lock(); m.offline++; m.mu.Unlock() }
-func (m *fakeMetrics) LiveStreamsChanged(d int) { m.mu.Lock(); m.streams += d; m.mu.Unlock() }
-
-func (m *fakeMetrics) snapshot() fakeMetrics {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return fakeMetrics{conflated: m.conflated, offline: m.offline, streams: m.streams, publishErrors: m.publishErrors}
 }
 
 type fakeSubscriber struct {
@@ -261,22 +238,20 @@ func (c *fakeClock) fire() {
 var t0 = time.Date(2026, 11, 20, 9, 30, 0, 0, time.UTC)
 
 type hubEnv struct {
-	hub     *Hub
-	sub     *fakeSubscriber
-	status  *fakeStatus
-	clock   *fakeClock
-	metrics *fakeMetrics
+	hub    *Hub
+	sub    *fakeSubscriber
+	status *fakeStatus
+	clock  *fakeClock
 }
 
 func newHubEnv(t *testing.T) *hubEnv {
 	t.Helper()
 	env := &hubEnv{
-		sub:     newFakeSubscriber(),
-		status:  &fakeStatus{},
-		clock:   &fakeClock{now: t0},
-		metrics: &fakeMetrics{},
+		sub:    newFakeSubscriber(),
+		status: &fakeStatus{},
+		clock:  &fakeClock{now: t0},
 	}
-	env.hub = NewHub(env.sub, env.status, HubOptions{Clock: env.clock, Metrics: env.metrics})
+	env.hub = NewHub(env.sub, env.status, HubOptions{Clock: env.clock})
 	t.Cleanup(env.hub.Close)
 	return env
 }
@@ -334,8 +309,8 @@ func watch(t *testing.T, hub *Hub, houseID string) *Stream {
 // ---- publisher ----
 
 func TestPublisherSendsReadingsToTheHouseChannel(t *testing.T) {
-	sender, metrics := &fakeSender{}, &fakeMetrics{}
-	p := NewPublisher(sender, nil, metrics)
+	sender := &fakeSender{}
+	p := NewPublisher(sender, nil)
 
 	p.PublishReading(context.Background(), redisstore.MeterProjection{HouseID: "h1", MeterID: "m1", Seq: 7, NetKw: 0.3})
 
@@ -344,7 +319,6 @@ func TestPublisherSendsReadingsToTheHouseChannel(t *testing.T) {
 		t.Fatalf("published %v, want one message on house:h1:live", sender.published)
 	}
 	var msg struct {
-		V       int    `json:"v"`
 		Type    string `json:"type"`
 		Reading struct {
 			MeterID string  `json:"meter_id"`
@@ -355,33 +329,30 @@ func TestPublisherSendsReadingsToTheHouseChannel(t *testing.T) {
 	if err := json.Unmarshal([]byte(got[0]), &msg); err != nil {
 		t.Fatal(err)
 	}
-	if msg.V != 1 || msg.Type != "reading" || msg.Reading.MeterID != "m1" || msg.Reading.Seq != 7 || msg.Reading.NetKw != 0.3 {
+	if msg.Type != "reading" || msg.Reading.MeterID != "m1" || msg.Reading.Seq != 7 || msg.Reading.NetKw != 0.3 {
 		t.Fatalf("message = %s", got[0])
-	}
-	if metrics.published["reading"] != 1 {
-		t.Fatalf("published metric = %v", metrics.published)
 	}
 }
 
 func TestPublisherSendsOnlineStatus(t *testing.T) {
 	sender := &fakeSender{}
-	NewPublisher(sender, nil, nil).PublishOnline(context.Background(), "h1", t0)
+	NewPublisher(sender, nil).PublishOnline(context.Background(), "h1", t0)
 
-	want := `{"v":1,"type":"status","status":"online","last_heartbeat_at":"2026-11-20T09:30:00Z"}`
+	want := `{"type":"status","status":"online","last_heartbeat_at":"2026-11-20T09:30:00Z"}`
 	if got := sender.published["house:h1:live"]; len(got) != 1 || got[0] != want {
 		t.Fatalf("published %v, want %s", got, want)
 	}
 }
 
-func TestPublisherCountsFailuresWithoutReturningThem(t *testing.T) {
-	metrics := &fakeMetrics{}
-	p := NewPublisher(&fakeSender{err: errors.New("redis down")}, nil, metrics)
+func TestPublisherLogsFailuresWithoutReturningThem(t *testing.T) {
+	var logs bytes.Buffer
+	p := NewPublisher(&fakeSender{err: errors.New("redis down")}, slog.New(slog.NewTextHandler(&logs, nil)))
 
 	p.PublishReading(context.Background(), redisstore.MeterProjection{HouseID: "h1"})
 	p.PublishOnline(context.Background(), "h1", t0)
 
-	if metrics.publishErrors != 2 {
-		t.Fatalf("publish errors = %d, want 2", metrics.publishErrors)
+	if got := strings.Count(logs.String(), `level=WARN msg="live event not published"`); got != 2 {
+		t.Fatalf("logged %d warnings, want 2:\n%s", got, logs.String())
 	}
 }
 
@@ -415,8 +386,8 @@ func TestHubSubscribesOnFirstStreamAndUnsubscribesAfterTheLast(t *testing.T) {
 	if got := env.sub.callLog(); len(got) != 2 || got[1] != "unsubscribe:h1" {
 		t.Fatalf("calls = %v, want unsubscribe after the last stream", got)
 	}
-	if m := env.metrics.snapshot(); m.streams != 0 {
-		t.Fatalf("streams gauge = %d, want 0", m.streams)
+	if n := watchedHouses(env.hub); n != 0 {
+		t.Fatalf("%d houses still watched, want 0", n)
 	}
 }
 
@@ -437,9 +408,6 @@ func TestHubKeepsOnlyTheLatestReadingForASlowStream(t *testing.T) {
 	if status == nil || !status.Online || !status.LastHeartbeatAt.Equal(t0) {
 		t.Fatalf("status = %+v, want online at %v kept next to the reading", status, t0)
 	}
-	if m := env.metrics.snapshot(); m.conflated != 1 {
-		t.Fatalf("conflated = %d, want 1", m.conflated)
-	}
 }
 
 func TestHubIgnoresMalformedEvents(t *testing.T) {
@@ -447,8 +415,8 @@ func TestHubIgnoresMalformedEvents(t *testing.T) {
 	s := watch(t, env.hub, "h1")
 
 	env.sub.deliver(t, "h1", []byte("not json"))
-	env.sub.deliver(t, "h1", []byte(`{"v":2,"type":"reading"}`))
-	env.sub.deliver(t, "h1", []byte(`{"v":1,"type":"unknown"}`))
+	env.sub.deliver(t, "h1", []byte(`{"type":"reading"}`))
+	env.sub.deliver(t, "h1", []byte(`{"type":"unknown"}`))
 
 	assertNothing(t, s)
 }
@@ -469,9 +437,6 @@ func TestHubReportsOfflineWhenTheStatusExpires(t *testing.T) {
 	status, reading := next(t, s)
 	if status == nil || status.Online || reading != nil {
 		t.Fatalf("status = %+v, reading = %+v; want offline only", status, reading)
-	}
-	if m := env.metrics.snapshot(); m.offline != 1 {
-		t.Fatalf("offline detected = %d, want 1", m.offline)
 	}
 	if got := env.clock.pending(); len(got) != 0 {
 		t.Fatalf("timers = %v, want none while offline", got)
@@ -698,8 +663,8 @@ func TestHubConcurrentFirstStreamsAllFailWhenSubscribeFails(t *testing.T) {
 			t.Fatal("Watch did not return")
 		}
 	}
-	if m := env.metrics.snapshot(); m.streams != 0 {
-		t.Fatalf("streams gauge = %d, want 0", m.streams)
+	if n := watchedHouses(env.hub); n != 0 {
+		t.Fatalf("%d houses still watched, want 0", n)
 	}
 }
 
@@ -749,8 +714,8 @@ func TestHubCloseWhileAFirstWatchIsSubscribing(t *testing.T) {
 		t.Fatal("Watch did not return")
 	}
 	<-closed
-	if m := env.metrics.snapshot(); m.streams != 0 {
-		t.Fatalf("streams gauge = %d, want 0", m.streams)
+	if n := watchedHouses(env.hub); n != 0 {
+		t.Fatalf("%d houses still watched, want 0", n)
 	}
 }
 
@@ -800,4 +765,11 @@ func TestHubSkipsTheUnsubscribeOfAHouseWatchedAgainBeforeItRan(t *testing.T) {
 	if !env.sub.subscribed["h1"] {
 		t.Fatal("h1 is not subscribed")
 	}
+}
+
+// watchedHouses counts the houses the hub holds, so tests can check nothing leaked.
+func watchedHouses(h *Hub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.houses)
 }

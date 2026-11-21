@@ -113,7 +113,6 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		{"POSTGRES_MAX_CONNS", "4294967296"},
 		{"KAFKA_FETCH_MAX_BYTES", "99999999999"},
 		{"POSTGRES_EXPECTED_MIGRATION", "v9"},
-		{"LIVE_ENABLED", "sometimes"},
 		{"LIVE_STREAM_MAX_AGE", "1h-ish"},
 		{"GRPC_MAX_CONCURRENT_STREAMS", "lots"},
 		{"GRPC_KEEPALIVE_MIN_TIME", "20"},
@@ -160,8 +159,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Input.MaxRecordBytes <= 0 {
 		t.Errorf("max record bytes = %d, want a positive default", cfg.Input.MaxRecordBytes)
 	}
-	if !cfg.Live.Enabled || cfg.Live.StreamMaxAge != time.Hour {
-		t.Errorf("live = %+v, want enabled with a 60m maximum stream age", cfg.Live)
+	if cfg.Live.StreamMaxAge != time.Hour {
+		t.Errorf("live = %+v, want a 60m maximum stream age", cfg.Live)
 	}
 	if cfg.GRPC.MaxConcurrentStreams != 1000 || cfg.GRPC.KeepaliveMinTime != 20*time.Second {
 		t.Errorf("grpc = %+v, want 1000 streams and a 20s keep-alive minimum", cfg.GRPC)

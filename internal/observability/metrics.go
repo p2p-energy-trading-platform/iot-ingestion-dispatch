@@ -32,12 +32,6 @@ type Metrics struct {
 	unresolvedFailures prometheus.Gauge
 	oldestUnresolved   prometheus.Gauge
 	dependencyUp       *prometheus.GaugeVec
-
-	liveStreams         prometheus.Gauge
-	livePublished       *prometheus.CounterVec
-	livePublishErrors   prometheus.Counter
-	liveConflated       prometheus.Counter
-	liveOfflineDetected prometheus.Counter
 }
 
 func NewMetrics() *Metrics {
@@ -109,27 +103,6 @@ func NewMetrics() *Metrics {
 			Namespace: "iot_ingestion", Name: "dependency_up",
 			Help: "1 when the dependency (postgres, redis) answered its last probe.",
 		}, []string{"dependency"}),
-
-		liveStreams: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "iot_ingestion", Name: "live_streams",
-			Help: "Open StreamHouseLive streams on this instance.",
-		}),
-		livePublished: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "iot_ingestion", Name: "live_events_published_total",
-			Help: "Live events published to Redis, by type (reading, status).",
-		}, []string{"type"}),
-		livePublishErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "iot_ingestion", Name: "live_publish_errors_total",
-			Help: "Live events that could not be published; ingestion continues without them.",
-		}),
-		liveConflated: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "iot_ingestion", Name: "live_events_conflated_total",
-			Help: "Live events replaced by a newer one before a slow stream sent them.",
-		}),
-		liveOfflineDetected: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "iot_ingestion", Name: "live_offline_detected_total",
-			Help: "Watched houses found offline when their status expired.",
-		}),
 	}
 
 	reg.MustRegister(
@@ -139,7 +112,6 @@ func NewMetrics() *Metrics {
 		m.rebalances, m.cacheDegraded,
 		m.registryGrids, m.registryRefreshes, m.registryRefreshTime, m.registryLastSuccess,
 		m.unresolvedFailures, m.oldestUnresolved, m.dependencyUp,
-		m.liveStreams, m.livePublished, m.livePublishErrors, m.liveConflated, m.liveOfflineDetected,
 	)
 	return m
 }
@@ -207,20 +179,3 @@ func (m *Metrics) SetDependencyUp(name string, up bool) {
 	}
 	m.dependencyUp.WithLabelValues(name).Set(v)
 }
-
-// LiveStreamsChanged adds delta to the open-streams gauge.
-func (m *Metrics) LiveStreamsChanged(delta int) { m.liveStreams.Add(float64(delta)) }
-
-// LiveEventPublished counts a published live event by type.
-func (m *Metrics) LiveEventPublished(eventType string) {
-	m.livePublished.WithLabelValues(eventType).Inc()
-}
-
-// LivePublishFailed counts a live event that could not be published.
-func (m *Metrics) LivePublishFailed() { m.livePublishErrors.Inc() }
-
-// LiveEventConflated counts a live event replaced before it was sent.
-func (m *Metrics) LiveEventConflated() { m.liveConflated.Inc() }
-
-// LiveOfflineDetected counts a watched house found offline.
-func (m *Metrics) LiveOfflineDetected() { m.liveOfflineDetected.Inc() }

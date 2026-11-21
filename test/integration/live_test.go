@@ -79,7 +79,7 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	if err := admission.NewRefresher(registry, e.pg, admission.RefresherConfig{}, quietLogger()).Bootstrap(ctx); err != nil {
 		t.Fatal(err)
 	}
-	publisher := live.NewPublisher(e.rd, quietLogger(), nil)
+	publisher := live.NewPublisher(e.rd, quietLogger())
 	e.router = ingestion.NewRouter()
 	e.router.Register(meterTopic, ingestion.NewMeterHandler(registry, e.pg, e.rd, quietLogger()).WithLivePublisher(publisher))
 	e.router.Register(heartbeatTopic, ingestion.NewHeartbeatHandler(registry, e.pg, e.rd, quietLogger()).WithLivePublisher(publisher))

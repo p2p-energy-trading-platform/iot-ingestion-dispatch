@@ -32,12 +32,6 @@ func TestMetricsExposeRequiredSignals(t *testing.T) {
 	m.ObserveRegistryRefresh(false, 0, time.Millisecond)
 	m.SetFailureBacklog(4, 90*time.Second)
 	m.SetDependencyUp("redis", false)
-	m.LiveStreamsChanged(2)
-	m.LiveStreamsChanged(-1)
-	m.LiveEventPublished("reading")
-	m.LivePublishFailed()
-	m.LiveEventConflated()
-	m.LiveOfflineDetected()
 
 	out := scrape(t, m)
 	for _, want := range []string{
@@ -53,11 +47,6 @@ func TestMetricsExposeRequiredSignals(t *testing.T) {
 		`iot_ingestion_unresolved_failures 4`,
 		`iot_ingestion_oldest_unresolved_failure_age_seconds 90`,
 		`iot_ingestion_dependency_up{dependency="redis"} 0`,
-		`iot_ingestion_live_streams 1`,
-		`iot_ingestion_live_events_published_total{type="reading"} 1`,
-		`iot_ingestion_live_publish_errors_total 1`,
-		`iot_ingestion_live_events_conflated_total 1`,
-		`iot_ingestion_live_offline_detected_total 1`,
 		`go_goroutines`,
 	} {
 		if !strings.Contains(out, want) {

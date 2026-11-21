@@ -13,29 +13,18 @@ type Sender interface {
 	Publish(ctx context.Context, channel string, payload []byte) error
 }
 
-// PublisherMetrics is satisfied by *observability.Metrics.
-type PublisherMetrics interface {
-	LiveEventPublished(eventType string)
-	LivePublishFailed()
-}
-
 // Publisher sends live events. Publishing is best effort: a failure is
-// counted and logged, never returned, so it cannot fail ingestion or hold a
-// Kafka offset.
+// logged, never returned, so it cannot fail ingestion or hold a Kafka offset.
 type Publisher struct {
-	sender  Sender
-	logger  *slog.Logger
-	metrics PublisherMetrics
+	sender Sender
+	logger *slog.Logger
 }
 
-func NewPublisher(sender Sender, logger *slog.Logger, metrics PublisherMetrics) *Publisher {
+func NewPublisher(sender Sender, logger *slog.Logger) *Publisher {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if metrics == nil {
-		metrics = nopMetrics{}
-	}
-	return &Publisher{sender: sender, logger: logger, metrics: metrics}
+	return &Publisher{sender: sender, logger: logger}
 }
 
 // PublishReading announces a reading that was stored as the house's latest.
@@ -55,17 +44,6 @@ func (p *Publisher) publish(ctx context.Context, houseID, eventType string, payl
 		err = p.sender.Publish(ctx, redisstore.HouseLiveChannel(houseID), payload)
 	}
 	if err != nil {
-		p.metrics.LivePublishFailed()
-		p.logger.DebugContext(ctx, "live event not published", "house_id", houseID, "type", eventType, "error", err)
-		return
+		p.logger.WarnContext(ctx, "live event not published", "house_id", houseID, "type", eventType, "error", err)
 	}
-	p.metrics.LiveEventPublished(eventType)
 }
-
-type nopMetrics struct{}
-
-func (nopMetrics) LiveEventPublished(string) {}
-func (nopMetrics) LivePublishFailed()        {}
-func (nopMetrics) LiveEventConflated()       {}
-func (nopMetrics) LiveOfflineDetected()      {}
-func (nopMetrics) LiveStreamsChanged(int)    {}

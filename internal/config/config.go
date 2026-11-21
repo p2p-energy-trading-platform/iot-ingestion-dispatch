@@ -150,11 +150,8 @@ type GRPCConfig struct {
 	KeepaliveMinTime time.Duration
 }
 
-// LiveConfig controls StreamHouseLive and the live events it relies on.
+// LiveConfig controls StreamHouseLive.
 type LiveConfig struct {
-	// Enabled publishes live events and serves StreamHouseLive. When false,
-	// nothing is published and the RPC answers UNAVAILABLE.
-	Enabled bool
 	// StreamMaxAge ends each stream after this long; callers reopen it.
 	StreamMaxAge time.Duration
 }
@@ -236,7 +233,6 @@ func Load() (*Config, error) {
 		},
 
 		Live: LiveConfig{
-			Enabled:      r.boolean("LIVE_ENABLED", true),
 			StreamMaxAge: r.duration("LIVE_STREAM_MAX_AGE", time.Hour),
 		},
 

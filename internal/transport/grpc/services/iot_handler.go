@@ -33,7 +33,6 @@ type IotHandler struct {
 	queries IotQueries
 	logger  *slog.Logger
 
-	// live is nil when live updates are disabled.
 	live         LiveWatcher
 	streamMaxAge time.Duration
 }
