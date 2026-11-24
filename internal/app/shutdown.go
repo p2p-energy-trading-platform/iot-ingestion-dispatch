@@ -53,6 +53,12 @@ func (app *App) shutdown() error {
 		errs = append(errs, fmt.Errorf("close kafka consumer: %w", ctx.Err()))
 	}
 
+	// Live streams never finish on their own, so end them first: they close
+	// with UNAVAILABLE and callers reconnect to a healthy instance at once,
+	// instead of waiting for the graceful-stop timeout.
+	app.logger.Info("Closing live streams")
+	app.liveHub.Close()
+
 	app.logger.Info("Stopping grpc server")
 	app.grpc.Stop()
 

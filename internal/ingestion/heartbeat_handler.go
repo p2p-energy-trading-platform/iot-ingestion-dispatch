@@ -18,7 +18,8 @@ type HeartbeatStore interface {
 
 // HeartbeatCache is satisfied by *redis.Store.
 type HeartbeatCache interface {
-	UpdateHeartbeat(ctx context.Context, gridID, houseID string, status redisstore.HouseStatus) error
+	// UpdateHeartbeat reports whether the house came online with this heartbeat.
+	UpdateHeartbeat(ctx context.Context, gridID, houseID string, status redisstore.HouseStatus) (cameOnline bool, err error)
 }
 
 // HeartbeatHandler runs the heartbeat workflow. It returns nil only when
@@ -28,6 +29,7 @@ type HeartbeatHandler struct {
 	admission GridAdmitter
 	store     HeartbeatStore
 	cache     HeartbeatCache
+	live      LivePublisher
 	logger    *slog.Logger
 	now       func() time.Time
 
@@ -55,6 +57,9 @@ func NewHeartbeatHandler(admission GridAdmitter, store HeartbeatStore, cache Hea
 
 // WithInputLimits sets the record size and key checks.
 func (h *HeartbeatHandler) WithInputLimits(l InputLimits) *HeartbeatHandler { h.limits = l; return h }
+
+// WithLivePublisher announces when a house comes online.
+func (h *HeartbeatHandler) WithLivePublisher(p LivePublisher) *HeartbeatHandler { h.live = p; return h }
 
 // WithCachePolicy sets the acknowledgement policy for Redis failures.
 func (h *HeartbeatHandler) WithCachePolicy(p CachePolicy, topic string, m Metrics) *HeartbeatHandler {
@@ -100,9 +105,16 @@ func (h *HeartbeatHandler) HandleRecord(ctx context.Context, key, value []byte) 
 
 	// 9. Atomic Redis heartbeat update, with the same receive timestamp.
 	status := redisstore.HouseStatus{Status: hb.Status, LastHeartbeatAt: receivedAt}
-	if err := h.cache.UpdateHeartbeat(ctx, hb.GridID, hb.HouseID, status); err != nil {
+	cameOnline, err := h.cache.UpdateHeartbeat(ctx, hb.GridID, hb.HouseID, status)
+	if err != nil {
 		err = fmt.Errorf("update heartbeat state for %s: %w", hb.HouseID, err)
 		return absorbCacheError(h.policy, h.metrics, h.logger, h.topic, err)
+	}
+
+	// Only the change from offline to online is live news; going offline is
+	// detected by the stream hub when the status key expires.
+	if cameOnline && h.live != nil {
+		h.live.PublishOnline(ctx, hb.HouseID, receivedAt)
 	}
 
 	// 10. The caller commits the Kafka offset on nil.

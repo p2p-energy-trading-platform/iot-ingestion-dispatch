@@ -51,15 +51,16 @@ type hbCacheCall struct {
 }
 
 type fakeHBCache struct {
-	order *[]string
-	calls []hbCacheCall
-	err   error
+	order      *[]string
+	calls      []hbCacheCall
+	cameOnline bool
+	err        error
 }
 
-func (f *fakeHBCache) UpdateHeartbeat(_ context.Context, gridID, houseID string, s redisstore.HouseStatus) error {
+func (f *fakeHBCache) UpdateHeartbeat(_ context.Context, gridID, houseID string, s redisstore.HouseStatus) (bool, error) {
 	*f.order = append(*f.order, "redis")
 	f.calls = append(f.calls, hbCacheCall{gridID: gridID, houseID: houseID, status: s})
-	return f.err
+	return f.cameOnline, f.err
 }
 
 func newTestHeartbeatHandler(fixed time.Time) (*HeartbeatHandler, *fakeHBStore, *fakeHBCache, *[]string) {
@@ -163,5 +164,63 @@ func TestCheckDuplicateAssetIDs(t *testing.T) {
 	dup := domain.Heartbeat{FlexibleAssets: []domain.FlexibleAsset{{AssetID: "a"}, {AssetID: "a"}}}
 	if err := checkDuplicateAssetIDs(dup); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("duplicate ids: error = %v, want ErrValidation", err)
+	}
+}
+
+// fakeLive records what the handlers publish.
+type fakeLive struct {
+	readings []redisstore.MeterProjection
+	online   []string
+	onlineAt []time.Time
+}
+
+func (f *fakeLive) PublishReading(_ context.Context, r redisstore.MeterProjection) {
+	f.readings = append(f.readings, r)
+}
+
+func (f *fakeLive) PublishOnline(_ context.Context, houseID string, at time.Time) {
+	f.online = append(f.online, houseID)
+	f.onlineAt = append(f.onlineAt, at)
+}
+
+func TestHeartbeatHandlerPublishesWhenTheHouseComesOnline(t *testing.T) {
+	fixed := time.Date(2026, 10, 1, 8, 15, 30, 0, time.UTC)
+	h, _, cache, _ := newTestHeartbeatHandler(fixed)
+	live := &fakeLive{}
+	h.WithLivePublisher(live)
+	cache.cameOnline = true
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validHeartbeatJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(live.online, []string{"grid01-house0042"}) || !live.onlineAt[0].Equal(fixed) {
+		t.Fatalf("published online %v at %v, want grid01-house0042 at %v", live.online, live.onlineAt, fixed)
+	}
+}
+
+func TestHeartbeatHandlerPublishesNothingWhileTheHouseStaysOnline(t *testing.T) {
+	h, _, _, _ := newTestHeartbeatHandler(time.Now())
+	live := &fakeLive{}
+	h.WithLivePublisher(live)
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validHeartbeatJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.online) != 0 {
+		t.Fatalf("published online %v for a house that was already online", live.online)
+	}
+}
+
+func TestHeartbeatHandlerPublishesNothingWhenRedisFails(t *testing.T) {
+	h, _, cache, _ := newTestHeartbeatHandler(time.Now())
+	live := &fakeLive{}
+	h.WithLivePublisher(live).WithCachePolicy(CacheAsyncRepair, "heartbeats", nil)
+	cache.cameOnline, cache.err = true, errors.New("redis down")
+
+	if err := h.HandleRecord(context.Background(), nil, []byte(validHeartbeatJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.online) != 0 {
+		t.Fatalf("published online %v although Redis failed", live.online)
 	}
 }

@@ -11,7 +11,10 @@ type HouseStatus struct {
 	LastHeartbeatAt time.Time
 }
 
-func (store *Store) UpdateHeartbeat(context context.Context, gridID, houseID string, status HouseStatus) error {
+// UpdateHeartbeat stores the house's status for the liveness window.
+// cameOnline is true when the house had no status before, that is when it
+// changes from offline to online.
+func (store *Store) UpdateHeartbeat(context context.Context, gridID, houseID string, status HouseStatus) (cameOnline bool, err error) {
 	return store.updateHeartbeatWithTTL(context, gridID, houseID, status, HeartbeatTTL)
 }
 
@@ -24,7 +27,7 @@ func (store *Store) RestoreHeartbeat(context context.Context, gridID, houseID st
 	if remaining < time.Second {
 		return false, nil
 	}
-	if err := store.updateHeartbeatWithTTL(context, gridID, houseID, status, remaining); err != nil {
+	if _, err := store.updateHeartbeatWithTTL(context, gridID, houseID, status, remaining); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -39,21 +42,21 @@ func (store *Store) AddHouseToGrid(context context.Context, gridID, houseID stri
 	return nil
 }
 
-func (store *Store) updateHeartbeatWithTTL(context context.Context, gridID, houseID string, status HouseStatus, ttl time.Duration) error {
+func (store *Store) updateHeartbeatWithTTL(context context.Context, gridID, houseID string, status HouseStatus, ttl time.Duration) (cameOnline bool, err error) {
 	statusKey := HouseStatusKey(houseID)
 	gridHousesKey := GridHousesKey(gridID)
 
-	_, err := store.updateHeartbeat.Run(context, store.rdb,
+	result, err := store.updateHeartbeat.Run(context, store.rdb,
 		[]string{statusKey, gridHousesKey},
 		int(ttl.Seconds()),
 		status.Status,
 		status.LastHeartbeatAt.Format(time.RFC3339),
 		houseID,
-	).Result()
+	).Int()
 	if err != nil {
-		return fmt.Errorf("redis: update_heartbeat for house %s: %w", houseID, err)
+		return false, fmt.Errorf("redis: update_heartbeat for house %s: %w", houseID, err)
 	}
-	return nil
+	return result == 1, nil
 }
 
 func (store *Store) GetHouseStatus(context context.Context, houseID string) (HouseStatus, error) {

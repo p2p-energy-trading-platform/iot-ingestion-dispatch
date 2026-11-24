@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/domain"
 )
@@ -27,6 +28,9 @@ type RegistrationStore interface {
 	UpdateMeterRegistrationRequestID(ctx context.Context, registrationID string, requestID string) error
 	GetRegistrationByMeterID(ctx context.Context, meterID string) (*RegistrationRecord, error)
 	GetRegistrationByUserID(ctx context.Context, userReference string) (*RegistrationRecord, error)
+	// GetApprovedRegistrationByUserID returns the account's approved
+	// primary-owner registration, or nil when it has none.
+	GetApprovedRegistrationByUserID(ctx context.Context, userID string) (*RegistrationRecord, error)
 }
 
 type ActuationDispatcher interface {
@@ -57,6 +61,21 @@ func NewService(client *Client, poller *Poller, store RegistrationStore, dispatc
 	}
 }
 
+// ensureNoApprovedMeter enforces one smart meter per account: a claim fails
+// with domain.ErrMeterAlreadyRegistered when the account already has an
+// approved primary-owner meter. Pending, rejected and expired claims never
+// block a new claim: a pending claim is not ownership until DEWA approves it.
+func (s *Service) ensureNoApprovedMeter(ctx context.Context, userID string) error {
+	approved, err := s.store.GetApprovedRegistrationByUserID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("check approved meter registration: %w", err)
+	}
+	if approved != nil {
+		return fmt.Errorf("account already has approved meter %q: %w", approved.MeterID, domain.ErrMeterAlreadyRegistered)
+	}
+	return nil
+}
+
 // RegisterHouse submits a link request to DEWA.
 func (s *Service) RegisterHouse(
 	ctx context.Context,
@@ -79,6 +98,10 @@ func (s *Service) RegisterHouse(
 
 	if strings.TrimSpace(request.UserReference) == "" {
 		return nil, domain.NewValidationError("user_reference", "is required")
+	}
+
+	if err := s.ensureNoApprovedMeter(ctx, request.UserReference); err != nil {
+		return nil, err
 	}
 
 	record := RegistrationRecord{
@@ -182,13 +205,17 @@ func (s *Service) ReverifyRegistration(
 		return nil, domain.NewValidationError("registration_id", "is required")
 	}
 
-	record, err := s.store.GetByRegistrationID(ctx, registrationID)
-	if err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return nil, fmt.Errorf("get registration for reverification: %w", err)
+	if err := s.ensureNoApprovedMeter(ctx, userReference); err != nil {
+		return nil, err
 	}
-	if record == nil {
-		if strings.TrimSpace(meterID) == "" {
-			return nil, domain.NewValidationError("meter_id", "is required for a new registration")
+
+	_, err := s.store.GetByRegistrationID(ctx, registrationID)
+	if err != nil {
+		// Retrigger process if request does not exist
+		payload := LinkRequest{
+			RegistrationID: registrationID,
+			MeterID:        meterID,
+			UserReference:  userReference,
 		}
 		if strings.TrimSpace(userReference) == "" {
 			return nil, domain.NewValidationError("user_reference", "is required for a new registration")

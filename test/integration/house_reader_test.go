@@ -16,13 +16,14 @@ const (
 	u1 = "11111111-1111-1111-1111-111111111111"
 	u2 = "22222222-2222-2222-2222-222222222222"
 	u3 = "33333333-3333-3333-3333-333333333333"
+	u4 = "44444444-4444-4444-4444-444444444444"
 	u9 = "99999999-9999-9999-9999-999999999999"
 )
 
 // newHouseEnv adds three houses to newEnv's grid01-house0042, names grid01
 // (grid02's display name is cleared) and gives house 0060 a battery and a
 // V2G-capable EV. Ownership comes from DEWA meter registrations: u1 is the
-// approved primary owner of 0060 and 0061, u2 of 0062 (where u9 is only an
+// approved primary owner of 0060, u4 of 0061 (an account has one smart meter), u2 of 0062 (where u9 is only an
 // approved viewer), and u3's claim on 0042 is still pending.
 func newHouseEnv(t *testing.T) *env {
 	t.Helper()
@@ -39,7 +40,7 @@ func newHouseEnv(t *testing.T) *env {
 			('bat_b', 'grid01-house0060', 'bess', 14, 5, 5, NULL);
 		INSERT INTO iot_data.meter_registrations (registration_id, meter_id, user_id, approval_status, role) VALUES
 			('reg-1', 'meter-grid01-house0060', '`+u1+`', 'APPROVED', 'PRIMARY_OWNER'),
-			('reg-2', 'meter-grid02-house0061', '`+u1+`', 'APPROVED', 'PRIMARY_OWNER'),
+			('reg-2', 'meter-grid02-house0061', '`+u4+`', 'APPROVED', 'PRIMARY_OWNER'),
 			('reg-3', 'meter-grid01-house0062', '`+u2+`', 'APPROVED', 'PRIMARY_OWNER'),
 			('reg-4', 'meter-grid01-house0062', '`+u9+`', 'APPROVED', 'VIEWER'),
 			('reg-5', 'meter-grid01-house0042', '`+u3+`', 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER');`); err != nil {
@@ -76,16 +77,17 @@ func TestListHousesFilters(t *testing.T) {
 		filter postgresstore.HouseFilter
 		want   []string
 	}{
-		"all":            {postgresstore.HouseFilter{Limit: 10}, []string{"grid01-house0042", "grid01-house0060", "grid01-house0062", "grid02-house0061"}},
-		"owner":          {postgresstore.HouseFilter{OwnerUserID: u1, Limit: 10}, []string{"grid01-house0060", "grid02-house0061"}},
-		"grid":           {postgresstore.HouseFilter{GridID: "grid01", Limit: 10}, []string{"grid01-house0042", "grid01-house0060", "grid01-house0062"}},
-		"owner and grid": {postgresstore.HouseFilter{OwnerUserID: u1, GridID: "grid02", Limit: 10}, []string{"grid02-house0061"}},
-		"unknown owner":  {postgresstore.HouseFilter{OwnerUserID: "nobody", Limit: 10}, []string{}},
-		"pending claim":  {postgresstore.HouseFilter{OwnerUserID: u3, Limit: 10}, []string{}},
-		"viewer only":    {postgresstore.HouseFilter{OwnerUserID: u9, Limit: 10}, []string{}},
-		"primary owner":  {postgresstore.HouseFilter{OwnerUserID: u2, Limit: 10}, []string{"grid01-house0062"}},
-		"page 1":         {postgresstore.HouseFilter{Limit: 2}, []string{"grid01-house0042", "grid01-house0060"}},
-		"page 2":         {postgresstore.HouseFilter{AfterHouseID: "grid01-house0060", Limit: 2}, []string{"grid01-house0062", "grid02-house0061"}},
+		"all":               {postgresstore.HouseFilter{Limit: 10}, []string{"grid01-house0042", "grid01-house0060", "grid01-house0062", "grid02-house0061"}},
+		"owner":             {postgresstore.HouseFilter{OwnerUserID: u1, Limit: 10}, []string{"grid01-house0060"}},
+		"grid":              {postgresstore.HouseFilter{GridID: "grid01", Limit: 10}, []string{"grid01-house0042", "grid01-house0060", "grid01-house0062"}},
+		"owner and grid":    {postgresstore.HouseFilter{OwnerUserID: u4, GridID: "grid02", Limit: 10}, []string{"grid02-house0061"}},
+		"owner, other grid": {postgresstore.HouseFilter{OwnerUserID: u1, GridID: "grid02", Limit: 10}, []string{}},
+		"unknown owner":     {postgresstore.HouseFilter{OwnerUserID: "nobody", Limit: 10}, []string{}},
+		"pending claim":     {postgresstore.HouseFilter{OwnerUserID: u3, Limit: 10}, []string{}},
+		"viewer only":       {postgresstore.HouseFilter{OwnerUserID: u9, Limit: 10}, []string{}},
+		"primary owner":     {postgresstore.HouseFilter{OwnerUserID: u2, Limit: 10}, []string{"grid01-house0062"}},
+		"page 1":            {postgresstore.HouseFilter{Limit: 2}, []string{"grid01-house0042", "grid01-house0060"}},
+		"page 2":            {postgresstore.HouseFilter{AfterHouseID: "grid01-house0060", Limit: 2}, []string{"grid01-house0062", "grid02-house0061"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -108,8 +110,13 @@ func TestListHousesFilters(t *testing.T) {
 		h.RatedSolarKw == nil || *h.RatedSolarKw != 6 || h.OwnerUserID == nil || *h.OwnerUserID != u1 {
 		t.Errorf("house 0060 = %+v", h)
 	}
-	if rows[1].GridDisplayName != "" || rows[1].RatedSolarKw != nil {
-		t.Errorf("house 0061 = %+v, want empty display name and nil rated solar", rows[1])
+
+	other, err := e.pg.ListHouses(ctx, postgresstore.HouseFilter{OwnerUserID: u4, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other[0].GridDisplayName != "" || other[0].RatedSolarKw != nil {
+		t.Errorf("house 0061 = %+v, want empty display name and nil rated solar", other[0])
 	}
 }
 
