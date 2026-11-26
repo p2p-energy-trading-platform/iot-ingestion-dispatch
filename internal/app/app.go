@@ -38,6 +38,7 @@ type App struct {
 
 	admissionRegistry  *admission.Registry
 	admissionRefresher *admission.Refresher
+	cleanupWorker      *registration.CleanupWorker
 }
 
 func New(
@@ -203,6 +204,7 @@ func New(
 	dewaClient := registration.NewClient(config.ExternalUtility.BaseUrl)
 	regPoller := registration.NewPoller(dewaClient)
 	regService := registration.NewService(dewaClient, regPoller, postgres, actuationProducer, logger)
+	cleanupWorker := registration.NewCleanupWorker(postgres, registration.CleanupConfig{}, logger)
 
 	liveHub := live.NewHub(redis.NewLiveSubscriber(context), redis, live.HubOptions{Logger: logger})
 	iotHandler := grpcservices.NewIotHandler(query.NewService(postgres, postgres, redis, redis), logger).
@@ -241,6 +243,7 @@ func New(
 
 		admissionRegistry:  admissionRegistry,
 		admissionRefresher: admissionRefresher,
+		cleanupWorker:      cleanupWorker,
 	}
 	if config.Metrics.Address != "" {
 		application.metricsHTTP = httphealth.NewMetrics(config.Metrics.Address, metrics.Handler())

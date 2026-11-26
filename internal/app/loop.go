@@ -64,6 +64,9 @@ func (app *App) Run(ctx context.Context) error {
 
 	go app.admissionRefresher.Start(ctx)
 
+	app.logger.Info("starting meter registration cleanup worker")
+	go app.cleanupWorker.Start(runCtx)
+
 	app.logger.Info("starting Kafka consumer",
 		"group", app.config.Kafka.ConsumerGroup,
 		"topics", []string{

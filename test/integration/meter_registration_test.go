@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/registration"
 	postgresstore "github.com/p2p-energy-trading-platform/iot-ingestion-dispatch/internal/store/postgres"
@@ -181,5 +182,68 @@ func TestOneMeterPerAccountMigrationRollsBack(t *testing.T) {
 	}
 	if _, err := provider.Up(ctx); err == nil {
 		t.Fatal("up succeeded although the account has two approved meters")
+	}
+}
+
+func TestDeleteStaleMeterRegistrationsInBatches(t *testing.T) {
+	pg, db := newRegistrationEnv(t)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO iot_data.meter_registrations
+			(registration_id, meter_id, user_id, approval_status, role, created_at, updated_at)
+		VALUES
+			('cleanup-pending', 'meter-clean-pending', $1, 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER',
+			 now() - interval '10 days', now() - interval '6 days'),
+			('cleanup-rejected', 'meter-clean-rejected', $1, 'REJECTED', 'PRIMARY_OWNER',
+			 now() - interval '10 days', now() - interval '6 days'),
+			('cleanup-expired', 'meter-clean-expired', $1, 'EXPIRED', 'PRIMARY_OWNER',
+			 now() - interval '10 days', now() - interval '6 days'),
+			('cleanup-recent', 'meter-clean-recent', $1, 'DEWA_APPROVAL_PENDING', 'PRIMARY_OWNER',
+			 now(), now()),
+			('cleanup-approved', 'meter-clean-approved', $1, 'APPROVED', 'PRIMARY_OWNER',
+			 now() - interval '10 days', now() - interval '6 days')`, owner); err != nil {
+		t.Fatalf("seed cleanup registrations: %v", err)
+	}
+
+	cutoff := time.Now().Add(-5 * 24 * time.Hour)
+	firstBatch, err := pg.DeleteStaleMeterRegistrations(ctx, cutoff, 2)
+	if err != nil {
+		t.Fatalf("delete first cleanup batch: %v", err)
+	}
+	if firstBatch != 2 {
+		t.Fatalf("first batch deleted %d registrations, want 2", firstBatch)
+	}
+
+	secondBatch, err := pg.DeleteStaleMeterRegistrations(ctx, cutoff, 2)
+	if err != nil {
+		t.Fatalf("delete second cleanup batch: %v", err)
+	}
+	if secondBatch != 1 {
+		t.Fatalf("second batch deleted %d registrations, want 1", secondBatch)
+	}
+
+	var eligibleRemaining int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM iot_data.meter_registrations
+		WHERE registration_id IN ('cleanup-pending', 'cleanup-rejected', 'cleanup-expired')`,
+	).Scan(&eligibleRemaining); err != nil {
+		t.Fatalf("count stale registrations: %v", err)
+	}
+	if eligibleRemaining != 0 {
+		t.Fatalf("%d stale non-approved registrations remain, want 0", eligibleRemaining)
+	}
+
+	var protectedRemaining int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM iot_data.meter_registrations
+		WHERE registration_id IN ('cleanup-recent', 'cleanup-approved')`,
+	).Scan(&protectedRemaining); err != nil {
+		t.Fatalf("count protected registrations: %v", err)
+	}
+	if protectedRemaining != 2 {
+		t.Fatalf("%d recent or approved registrations remain, want 2", protectedRemaining)
 	}
 }
