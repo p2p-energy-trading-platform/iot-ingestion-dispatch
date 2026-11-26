@@ -38,7 +38,7 @@ type App struct {
 
 	admissionRegistry  *admission.Registry
 	admissionRefresher *admission.Refresher
-	cleanupWorker     *registration.CleanupWorker
+	cleanupWorker      *registration.CleanupWorker
 }
 
 func New(
