@@ -36,11 +36,11 @@ func NewPoller(client *Client) *Poller {
 		client:   client,
 		interval: defaultPollInterval,
 		timeout:  defaultPollTimeout,
-		logger:   slog.Default(),
 	}
 }
 
-// PollLinkRequest checks DEWA until the request is approved, rejected, or times out.
+// PollLinkRequest checks DEWA until the request is approved,
+// rejected, cancelled, or times out.
 func (p *Poller) PollLinkRequest(
 	ctx context.Context,
 	requestID string,

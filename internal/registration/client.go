@@ -35,7 +35,6 @@ func NewClient(baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		logger: slog.Default(),
 	}
 }
 

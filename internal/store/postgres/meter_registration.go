@@ -66,11 +66,11 @@ func (s *Store) GetByRegistrationID(
 	registrationID string,
 ) (*regdomain.RegistrationRecord, error) {
 	const query = `
-		SELECT id, user_id, meter_id, registration_id, COALESCE(request_id, ''), role, approval_status
+		SELECT id, user_id, meter_id, registration_id, role, approval_status
 		FROM iot_data.meter_registrations
 		WHERE registration_id = $1
 		ORDER BY created_at DESC
-		LIMIT 1
+        LIMIT 1
 	`
 
 	var reg regdomain.RegistrationRecord
@@ -79,15 +79,11 @@ func (s *Store) GetByRegistrationID(
 		&reg.UserID,
 		&reg.MeterID,
 		&reg.RegistrationID,
-		&reg.RequestID,
 		&reg.Role,
 		&reg.ApprovalStatus,
 	)
 
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("registration %q: %w", registrationID, domain.ErrNotFound)
-		}
 		return nil, fmt.Errorf("get registration by ID %q: %w", registrationID, err)
 	}
 
@@ -99,7 +95,7 @@ func (s *Store) GetRegistrationByMeterID(
 	meterID string,
 ) (*regdomain.RegistrationRecord, error) {
 	const query = `
-		SELECT id, user_id, registration_id, meter_id, COALESCE(request_id, ''), role, approval_status
+        SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
         WHERE meter_id = $1
 		ORDER BY created_at DESC
@@ -112,15 +108,11 @@ func (s *Store) GetRegistrationByMeterID(
 		&reg.UserID,
 		&reg.RegistrationID,
 		&reg.MeterID,
-		&reg.RequestID,
 		&reg.Role,
 		&reg.ApprovalStatus,
 	)
 
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("meter %q: %w", meterID, domain.ErrNotFound)
-		}
 		return nil, fmt.Errorf("get registration by meter ID %q: %w", meterID, err)
 	}
 
@@ -132,7 +124,7 @@ func (s *Store) GetRegistrationByUserID(
 	userID string,
 ) (*regdomain.RegistrationRecord, error) {
 	const query = `
-		SELECT id, user_id, registration_id, meter_id, COALESCE(request_id, ''), role, approval_status
+        SELECT id, user_id, registration_id, meter_id, role, approval_status
         FROM iot_data.meter_registrations
         WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -145,15 +137,11 @@ func (s *Store) GetRegistrationByUserID(
 		&reg.UserID,
 		&reg.RegistrationID,
 		&reg.MeterID,
-		&reg.RequestID,
 		&reg.Role,
 		&reg.ApprovalStatus,
 	)
 
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("user %q: %w", userID, domain.ErrNotFound)
-		}
 		return nil, fmt.Errorf("get registration by user ID %q: %w", userID, err)
 	}
 
