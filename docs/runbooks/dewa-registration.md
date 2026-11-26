@@ -78,7 +78,7 @@ Migration file:
 The table contains:
 - `registration_id`
 - `meter_id`
-- `user_reference`
+- `user_id`
 - `approval_status`
 - `created_at`
 - `updated_at`
@@ -89,9 +89,15 @@ Supported statuses:
 - `DEWA_APPROVAL_PENDING`
 - `APPROVED`
 - `REJECTED`
-- `TIMED_OUT`
+- `EXPIRED`
 
 Apply the project's database migrations before running the registration service against PostgreSQL.
+
+### Stale registration cleanup
+
+The service starts a background worker after verifying the database migrations. It runs once at startup and then every 24 hours, deleting stale registrations in batches of up to 500. A registration is considered stale when its `updated_at` is more than five days old.
+
+The worker deletes only `DEWA_APPROVAL_PENDING`, `REJECTED`, and `EXPIRED` records. Approved registrations and recently updated registrations are retained. Migration `00014_add_meter_registration_cleanup_index.sql` adds the index used by the cleanup query.
 
 ## 6. Error Handling
 
